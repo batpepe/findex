@@ -1,0 +1,32 @@
+[project]
+name = "findex"
+version = "0.1.0"
+description = "A full-text search engine over the Python docs and PEPs, built in 8 labs"
+readme = "README.md"
+authors = [
+    { name = "batpepe", email = "oskostya25@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = []
+
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.17.1",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "PTH"]
+# the corpus and tests are deliberately multilingual
+allowed-confusables = ["σ", "ς", "Σ", "ʼ", "’", "‘", "＇", "і"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

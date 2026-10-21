@@ -1,0 +1,25 @@
+# corpus and generated artifacts never go into git
+data/
+*.idx
+*.bin
+*.pkl
+*.prof
+crawl.log
+
+# python / tooling
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.hypothesis/
+.benchmarks/
+
+# local notes (defense prep, not part of the project)
+notes/
+.DS_Store
