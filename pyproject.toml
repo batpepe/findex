@@ -26,7 +26,7 @@ target-version = "py314"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "PTH"]
 # the corpus and tests are deliberately multilingual
-allowed-confusables = ["σ", "ς", "Σ", "ʼ", "’", "‘", "＇", "і"]
+allowed-confusables = ["σ", "ς", "Σ", "ʼ", "’", "‘", "＇", "і", "×"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

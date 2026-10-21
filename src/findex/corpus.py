@@ -18,6 +18,7 @@ import gzip
 import json
 import logging
 import os
+import re
 from collections.abc import Iterator
 from pathlib import Path
 from typing import IO, NamedTuple
@@ -103,19 +104,18 @@ def _read_jsonl(path: Path, rel_path: str) -> Iterator[tuple[str, str, str]]:
             yield url, record.get("title") or url, text
 
 
+_FIRST_LINE = re.compile(r"^[ \t]*(?:#+[ \t]+)?(\S.*?)[ \t]*$", re.MULTILINE)
+_PEP_FIELD = re.compile(r"^(PEP|Title):[ \t]*(.+?)[ \t]*$", re.MULTILINE)
+_RST_MARKUP = re.compile(r"``|\\ ")  # ``literal`` quotes and "\ " escapes in PEP titles
+
+
 def extract_title(text: str, fallback: str) -> str:
-    """Best-effort human title: PEP header, Markdown heading, or first line."""
-    if text.startswith("PEP:"):
-        number = title = ""
-        for line in text.splitlines()[:12]:
-            if line.startswith("PEP:"):
-                number = line.removeprefix("PEP:").strip()
-            elif line.startswith("Title:"):
-                title = line.removeprefix("Title:").strip()
-        if number and title:
-            return f"PEP {number} \N{EN DASH} {title}"
-    for line in text.splitlines():
-        line = line.strip()
-        if line:
-            return line.removeprefix("# ").strip() or fallback
-    return fallback
+    """Best-effort human title: PEP header, Markdown heading, or first non-blank line."""
+    head = text[:4096]  # never scan (or split) a whole multi-megabyte document for a title
+    if head.startswith("PEP:"):
+        fields = dict(reversed(_PEP_FIELD.findall(head)))  # reversed: the first occurrence wins
+        if "PEP" in fields and "Title" in fields:
+            title = _RST_MARKUP.sub("", fields["Title"])
+            return f"PEP {fields['PEP']} \N{EN DASH} {title}"
+    match = _FIRST_LINE.search(head)
+    return match.group(1) if match else fallback
