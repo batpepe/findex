@@ -4,6 +4,7 @@
     findex [-v | -vv] search <index> "<query>" [-k 10] [--scorer bm25|tfidf] [--json]
     findex [-v | -vv] stats <index> [--top 20]
     findex [-v | -vv] crawl <seed-url>... [--max-pages 500] [--concurrency 10] [--per-host 2] [--out FILE]
+    findex serve [INDEX] [--host 127.0.0.1] [--port 8000] [--workers 1]
 
 Results go to stdout (``--json`` emits one JSON object per line, for ``jq``);
 progress, logs and errors go to stderr. Expected failures - a missing index, a
@@ -335,3 +336,30 @@ async def _crawl_to_jsonl(
         url_log.removeHandler(handler)
         handler.close()
 
+
+@app.command()
+def serve(
+    index_path: Annotated[Path, typer.Argument(metavar="INDEX", help="Index file to serve.")] = Path(
+        "index.bin"
+    ),
+    host: Annotated[str, typer.Option(help="Interface to bind.")] = "127.0.0.1",
+    port: Annotated[int, typer.Option(min=1, max=65535)] = 8000,
+    workers: Annotated[int, typer.Option(min=1, help="Uvicorn worker processes (each maps the index).")] = 1,
+) -> None:
+    """Serve the search API and web UI (FastAPI on uvicorn)."""
+    import os
+
+    import uvicorn
+
+    if not index_path.is_file():
+        raise _fail(f"index file not found: {index_path} (build one with `findex index`)")
+    os.environ["INDEX_PATH"] = str(index_path.resolve())  # read by the app's Settings in every worker
+    uvicorn.run(
+        "findex.web.app:app",
+        host=host,
+        port=port,
+        workers=workers,
+        proxy_headers=True,  # trust X-Forwarded-* from the reverse proxy in front (Traefik, Cloudflare)
+        forwarded_allow_ips="*",
+        log_level="warning",
+    )

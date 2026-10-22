@@ -106,3 +106,21 @@ def test_binary_format_is_deterministic(index: Index, tmp_path: Path) -> None:
     save(index, tmp_path / "1.bin")
     save(load(tmp_path / "1.bin"), tmp_path / "2.bin")
     assert (tmp_path / "1.bin").read_bytes() == (tmp_path / "2.bin").read_bytes()
+
+
+def test_a_mapped_index_can_be_searched_from_many_threads(index_file: Path) -> None:
+    """Regression: on free-threaded 3.14t one memoryview shared by all threads broke
+    ("operation forbidden on released memoryview object"). CI runs this on 3.14t."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from findex.rank import Searcher
+
+    with open_index(index_file) as mapped:
+        searcher = Searcher(mapped, cache_size=0)  # no cache: every call decodes postings again
+
+        def search(_: int) -> list[int]:
+            return [r.doc_id for r in searcher.search('"event loop" OR walrus', k=5)]
+
+        with ThreadPoolExecutor(16) as pool:
+            answers = list(pool.map(search, range(400)))
+    assert answers[0] and all(answer == answers[0] for answer in answers)

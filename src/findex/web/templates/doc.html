@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}{{ doc.title }} - findex{% endblock %}
+{% block content %}
+<p class="back"><a href="/?q={{ q | urlencode }}">← {% if q %}back to results for “{{ q }}”{% else %}search{% endif %}</a></p>
+<article class="doc">
+  <h1>{{ doc.title }}</h1>
+  <div class="meta">
+    {% if doc.url %}<a href="{{ doc.url }}" rel="nofollow">{{ doc.url }}</a>{% else %}{{ doc.path }}{% endif %}
+    · {{ "{:,}".format(doc.length) }} tokens · <a href="/docs/{{ doc.doc_id }}">JSON</a>
+  </div>
+  <pre class="text">{{ body | safe }}</pre>
+  {% if doc.truncated %}
+  <p class="source">This is an excerpt of a page findex crawled for search.
+     <a href="{{ doc.url }}" rel="nofollow">Read the whole page on its own site →</a></p>
+  {% endif %}
+</article>
+{% endblock %}

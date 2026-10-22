@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}{% if q %}{{ q }} - findex{% else %}findex{% endif %}{% endblock %}
+{% block content %}
+<form class="search" action="/" method="get" role="search">
+  <input type="search" name="q" value="{{ q }}" placeholder='asyncio TaskGroup, "event loop" NOT tkinter, free-threaded' autofocus aria-label="Query">
+  <select name="scorer" aria-label="Ranking">
+    <option value="bm25" {% if scorer == "bm25" %}selected{% endif %}>BM25</option>
+    <option value="tfidf" {% if scorer == "tfidf" %}selected{% endif %}>TF-IDF</option>
+  </select>
+  <button type="submit">Search</button>
+</form>
+
+{% if error %}
+  <p class="error">{{ error }}</p>
+{% elif result %}
+  <p class="summary">{{ "{:,}".format(result.total) }} documents match · page {{ page }} of {{ pages }} · {{ result.took_ms }} ms</p>
+  <ol class="results" start="{{ (page - 1) * 10 + 1 }}">
+    {% for r in result.results %}
+    <li>
+      <a class="title" href="/doc/{{ r.doc_id }}?q={{ q | urlencode }}">{{ r.title }}</a>
+      <div class="meta">
+        {% set url = source_url(r.path) %}
+        {% if url %}<a href="{{ url }}" rel="nofollow">{{ url }}</a>{% else %}{{ r.path }}{% endif %}
+        · score {{ "%.2f" | format(r.score) }}
+      </div>
+      {% if r.snippet %}<p class="snippet">{{ r.snippet.html() | safe }}</p>{% endif %}
+    </li>
+    {% endfor %}
+  </ol>
+  {% if pages > 1 %}
+  <nav class="pager" aria-label="Pages">
+    {% if page > 1 %}<a href="/?q={{ q | urlencode }}&scorer={{ scorer }}&page={{ page - 1 }}">← previous</a>{% endif %}
+    {% if page < pages and page < 100 %}<a href="/?q={{ q | urlencode }}&scorer={{ scorer }}&page={{ page + 1 }}">next →</a>{% endif %}
+  </nav>
+  {% endif %}
+{% else %}
+  <section class="intro">
+    <p>{{ "{:,}".format(index.num_docs) }} documents, {{ "{:,}".format(index|length) }} distinct terms.
+       Words are ANDed; use <code>OR</code>, <code>NOT</code>, parentheses and <code>"quoted phrases"</code>.</p>
+    <p>Try:
+      <a href="/?q=asyncio+TaskGroup">asyncio TaskGroup</a> ·
+      <a href="/?q=%22event+loop%22+NOT+asyncio">"event loop" NOT asyncio</a> ·
+      <a href="/?q=free-threaded+GIL">free-threaded GIL</a> ·
+      <a href="/?q=pyproject+build+backend">pyproject build backend</a>
+    </p>
+  </section>
+{% endif %}
+{% endblock %}

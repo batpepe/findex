@@ -42,3 +42,19 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.1
       - run: uv build
       - run: uv tool install dist/*.whl && findex --version && findex --help
+
+  docker:
+    name: docker image (build + smoke test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker build -t findex:ci .
+      - name: smoke test
+        run: |
+          docker run -d --name findex -p 8000:8000 findex:ci
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8000/health; then break; fi
+            sleep 1
+          done
+          curl -fsS "http://127.0.0.1:8000/search?q=asyncio+TaskGroup&k=1"
+          docker stop findex

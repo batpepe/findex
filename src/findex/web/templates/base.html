@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>{% block title %}findex{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="/">findex</a>
+    <span class="tagline">search the Python docs, every PEP, and the PyPA, devguide and typing sites</span>
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+  <footer>
+    findex {{ version }} · <a href="/docs">API</a> · <a href="/stats">stats</a> ·
+    <a href="https://github.com/batpepe/findex">source</a><br>
+    Python documentation © Python Software Foundation (PSF License); PEPs are public domain or CC0;
+    crawled pages belong to their projects and are shown as excerpts linking to the source.
+  </footer>
+</body>
+</html>

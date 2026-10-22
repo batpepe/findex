@@ -1,6 +1,6 @@
 [project]
 name = "findex"
-version = "0.4.0"
+version = "0.7.0"
 description = "A full-text search engine over the Python docs and PEPs, built in 8 labs"
 readme = "README.md"
 license = "MIT"

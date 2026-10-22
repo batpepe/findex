@@ -14,6 +14,7 @@ and one piece of the engine; every lab is tagged (`lab-01`, `lab-02`, …) so th
 | 4 | Typing, testing, packaging | `findex` CLI (typer + rich), pyright strict, 77 tests, CI, v0.4.0 wheel | `lab-04` |
 | 5 | Concurrency and the GIL | parallel indexing: serial / threads / processes / free-threaded, benchmarked | `lab-05` |
 | 6 | asyncio | a polite async crawler (robots.txt, per-host limits, retries) that feeds the corpus | `lab-06` |
+| 7 | FastAPI, Pydantic, Docker | search API + web UI, containerized, load-tested | `lab-07` |
 
 ## Quick start
 
@@ -788,3 +789,117 @@ atomic — I never needed a lock — and anything slow between two `await`s free
 concurrency (TaskGroup, cancellation, shutdown) made "stop at 500 pages" a few lines. And the scheduling
 policy matters more than the concurrency level: the same 20 workers went from 1.2 to 3.1 pages/s by changing
 which URL they were given, not how many there were.
+
+---
+
+## Lab 7 — Search on the web
+
+**Built:** `findex.web` — one FastAPI app with a JSON API and an HTML UI, served by uvicorn (`findex serve`
+or the Docker image).
+
+| Route | What |
+|---|---|
+| `GET /search?q=&k=&page=&scorer=` | `SearchResponse{query, scorer, total, page, k, pages, took_ms, results[]}`; each hit: `doc_id, title, path, url, score, snippet, highlights` |
+| `GET /docs/{doc_id}` | the document (404 with `{"detail": "no document 999"}` if unknown) |
+| `GET /stats` | documents, terms, tokens, index size, uptime, query-cache hits/misses |
+| `GET /health` | `{"status": "ok", "documents": N}`, or **503** while no index is loaded |
+| `GET /docs` | the OpenAPI browser FastAPI generates from the type hints |
+| `GET /`, `GET /doc/{id}` | the UI: search box, BM25/TF-IDF toggle, highlighted snippets, pagination, document view |
+
+- **Validation is the type hints.** `q: Annotated[str, Query(min_length=1, max_length=200)]`,
+  `k: Annotated[int, Query(ge=1, le=100)]`, `scorer: Literal["bm25", "tfidf"]` — `?k=abc` or `?scorer=pagerank`
+  is a 422 with a JSON body that says which field and why, without a line of validation code. A query with
+  bad *syntax* is a 400 (`"bad query: missing ')' for '(' at offset 0"`); `page × k > 1000` is refused.
+- **Pydantic only at the edge.** `SearchHit`, `SearchResponse`, `DocumentResponse`... are the wire format;
+  inside, the Lab 2–3 dataclasses are unchanged. `SearchHit.from_result()` is the whole seam. Config is a
+  `pydantic-settings` `Settings` read from the environment (`INDEX_PATH`, `LOG_LEVEL`, `LOG_JSON`,
+  `CORS_ORIGINS`, `SEARCH_CACHE_SIZE`; a `.env` in development) — no paths in code.
+- **The index is loaded once,** in the `lifespan` async context manager (Lab 3's `open_index`, async), and
+  reaches the routes through `Depends(get_searcher)`. Tests swap it for the fixture corpus with
+  `app.dependency_overrides[get_searcher] = ...` — no index file, no lifespan. If loading fails, the app
+  still starts and `/health` says 503, so the platform keeps it out of rotation instead of crash-looping.
+- **Every request gets an id** (`X-Request-ID`, generated or passed through) and one log line; an unexpected
+  exception is logged with that id and the traceback and answered as a clean
+  `500 {"detail": "internal server error", "request_id": "..."}`. Logs are JSON lines on stdout with
+  `LOG_JSON=true` (the default in the image).
+- **Licensing, checked:** the public image indexes only the Python documentation (PSF License) and the PEPs
+  (public domain / CC0), which may be redistributed; for crawled pages the API and UI return a 600-character
+  excerpt and the link to the source (`truncated: true`), never the whole page.
+- **Tests:** 21 `TestClient` tests with the dependency overridden — success, pagination, eight 422s, the 400,
+  404, `/health` 503 without an index, the lifespan loading from `INDEX_PATH`, the clean 500 with the request
+  id, the OpenAPI paths, and the UI pages.
+
+### `def` or `async def`? Measured
+
+`/search` ranks with Python code — CPU work, ~20 ms for these queries. As `async def` it runs on the event
+loop and blocks it; as a plain `def` FastAPI runs it in its thread pool. `scripts/bench_web.py` (each variant
+its own uvicorn, query cache off) sends 20 different searches at once plus one `/health` probe 20 ms later:
+
+| `/search` is | All 20 done (s) | Median search (ms) | `/health` probe waited (ms) |
+|---|---|---|---|
+| `async def` | 0.44 | 430 | 410 |
+| `def` (thread pool) | 0.43 | 421 | 398 |
+| `def` (thread pool), free-threaded 3.14t | **0.26** | **160** | **53** |
+
+Under the GIL the two are nearly the same, and that is the lesson: `def` keeps the event loop *free*, but
+the loop then has to win the GIL from 20 busy threads to answer `/health`, so the probe still waits ~400 ms.
+Only on the free-threaded build does the thread pool actually run the searches in parallel (2.6× better
+median, `/health` answered in 53 ms). **Decision: `def`** — it is the correct shape (a 200 ms query never
+freezes static files and health checks behind it, and the same code scales on a no-GIL interpreter), and
+CPU-bound throughput comes from processes (below).
+
+### Load test
+
+`oha`, 15 s, 50 concurrent clients cycling through 20 realistic queries, query cache off, keep-alive off (a
+new connection per request, so with several worker processes an idle one accepts it), median of 3 runs
+(`uv run python scripts/bench_web.py index.bin .venv-ft/bin/python`):
+
+| Target | Route | Concurrency | RPS | p50 (ms) | p95 | p99 |
+|---|---|---|---|---|---|---|
+| local, 1 worker, `async def` | `/search` | 50 | 47 | 1088 | 1777 | 1826 |
+| local, 1 worker, `def` | `/search` | 50 | 46 | 1058 | 1680 | 1717 |
+| local, 4 workers, `def` | `/search` | 50 | **150** | **306** | 629 | 976 |
+| local, 1 worker, `def`, 3.14t (no GIL) | `/search` | 50 | 76 | 558 | 1624 | 2956 |
+
+- **1 worker: ~46 RPS either way** — one GIL, one core's worth of Python; 50 clients just queue, so p50 ≈ 50
+  × 21 ms ≈ 1 s. The `async def` row has the slightly worse tail: the loop serves the queued requests strictly
+  in turn and cannot even accept connections while ranking.
+- **4 workers: 3.2× the throughput, a third of the latency** — four processes, four GILs, four cores (Lab 5
+  again). And because the index is `mmap`ed, the four processes share one copy of it in the OS page cache.
+- **Free-threaded: 1.6× with one process,** but the worst p99 — threads contend on shared objects (Lab 5's
+  observation, now in a server).
+- I first ran oha with keep-alive and got 93 RPS for 4 workers in one run and 52 in the next: with 50
+  long-lived connections, whichever worker accepted most of them did most of the work. Measuring a server
+  is measuring its connection handling too.
+
+### What the GIL was hiding, part 2
+
+The free-threaded row first came out as a wall of 500s: `ValueError: operation forbidden on released
+memoryview object`. Lab 2's `MappedPostings` kept **one** `memoryview` of the memory-mapped index and every
+request sliced it. Under the GIL that is safe; on 3.14t, slicing one shared memoryview from many threads is
+not — a 20-line repro (16 threads slicing one view) fails in all 16 threads on 3.14t and never with the GIL,
+while a fresh `memoryview(mmap)` per call, or a copied slice, never fails. Each call now takes its own view
+(free: a view is a small header, the data is not copied), and a regression test searches one mapped index
+from 16 threads — CI runs it on 3.14t. The same lesson as Lab 5's `Counter`, one level down: shared state
+was correct only because the GIL serialized it.
+
+### Docker
+
+A multi-stage `Dockerfile` following the uv guide: the **builder** (`ghcr.io/astral-sh/uv:0.12.1-python3.14`)
+installs the locked dependencies, then the project, into `/app/.venv` (dependency layer cached until
+`uv.lock` changes); the **index** stage downloads the corpus and builds `index.bin` in the image; the
+**runtime** is `python:3.14-slim` with security updates applied, only the venv and the index, a non-root user
+(uid 10001), a `HEALTHCHECK` on `/health`, and uvicorn as PID 1 in exec form so `SIGTERM` reaches it:
+
+```text
+$ docker build -t findex . && docker run -d -p 8000:8000 --name findex findex
+$ curl -s localhost:8000/health
+{"status":"ok","documents":1297}
+$ docker stop findex && docker logs findex | tail -3
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [1]
+```
+
+323 MB (Debian slim + Python 32 MB + venv 48 MB + index 34 MB). `docker run -v $PWD/index.bin:/data/index.bin
+-e INDEX_PATH=/data/index.bin` serves any other index.

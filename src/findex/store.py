@@ -179,8 +179,7 @@ def load_binary(path: Path) -> Index:
     data_start = header_start + header_len
     data_start += -data_start % 8
 
-    view = memoryview(mapped)
-    postings = MappedPostings(view, data_start, header["terms"], header["has_positions"])
+    postings = MappedPostings(mapped, data_start, header["terms"], header["has_positions"])
     texts_start = data_start + header["postings_size"]
     text_spans: dict[int, tuple[int, int]] = {}
     doc_lengths: dict[int, int] = {}
@@ -189,21 +188,26 @@ def load_binary(path: Path) -> Index:
         doc_meta[doc_id] = DocMeta(doc_path, title)
         doc_lengths[doc_id] = length
         text_spans[doc_id] = (texts_start + text_offset, text_size)
-    texts = MappedTexts(view, text_spans) if header["has_texts"] else None
+    texts = MappedTexts(mapped, text_spans) if header["has_texts"] else None
 
     index = Index(postings, doc_lengths, doc_meta, has_positions=header["has_positions"], texts=texts)
-    index.on_close(mapped.close)  # runs last: the views below must be released first
-    index.on_close(view.release)
+    index.on_close(mapped.close)
     return index
 
 
 class MappedPostings(Mapping[str, list[Posting]]):
-    """term -> postings, decoded on demand from an ``mmap``-ed binary index."""
+    """term -> postings, decoded on demand from an ``mmap``-ed binary index.
+
+    Every call takes its *own* ``memoryview`` of the map. One memoryview shared by
+    all threads was fine under the GIL and broke on free-threaded 3.14t
+    ("operation forbidden on released memoryview object"): concurrent slicing of
+    a single memoryview is not thread-safe there. A fresh view costs nothing.
+    """
 
     def __init__(
-        self, view: memoryview, data_start: int, terms: dict[str, list[int]], has_positions: bool
+        self, mapped: mmap.mmap, data_start: int, terms: dict[str, list[int]], has_positions: bool
     ) -> None:
-        self._view = view
+        self._mapped = mapped
         self._data_start = data_start
         self._terms = terms
         self._has_positions = has_positions
@@ -212,11 +216,12 @@ class MappedPostings(Mapping[str, list[Posting]]):
         """Zero-copy ``uint32`` views of a term's doc ids, tfs and (if stored) positions."""
         offset, df, total_tf = self._terms[term]  # KeyError for unknown terms, like a dict
         start = self._data_start + offset
-        doc_ids = self._view[start : start + 4 * df].cast("I")
-        tfs = self._view[start + 4 * df : start + 8 * df].cast("I")
+        view = memoryview(self._mapped)
+        doc_ids = view[start : start + 4 * df].cast("I")
+        tfs = view[start + 4 * df : start + 8 * df].cast("I")
         if not self._has_positions:
             return doc_ids, tfs, None
-        return doc_ids, tfs, self._view[start + 8 * df : start + 8 * df + 4 * total_tf].cast("I")
+        return doc_ids, tfs, view[start + 8 * df : start + 8 * df + 4 * total_tf].cast("I")
 
     def __getitem__(self, term: str) -> list[Posting]:
         return decode_postings(*self.raw(term))
@@ -240,14 +245,13 @@ class MappedPostings(Mapping[str, list[Posting]]):
 class MappedTexts:
     """Compressed document texts read straight from the memory-mapped file."""
 
-    def __init__(self, view: memoryview, spans: dict[int, tuple[int, int]]) -> None:
-        self._view = view
+    def __init__(self, mapped: mmap.mmap, spans: dict[int, tuple[int, int]]) -> None:
+        self._mapped = mapped
         self._spans = spans
 
     def blob(self, doc_id: int) -> bytes:
         start, size = self._spans[doc_id]
-        return bytes(self._view[start : start + size])
+        return self._mapped[start : start + size]  # mmap slicing copies: safe from any thread
 
     def text(self, doc_id: int) -> str:
-        start, size = self._spans[doc_id]
-        return zlib.decompress(self._view[start : start + size]).decode()
+        return zlib.decompress(self.blob(doc_id)).decode()

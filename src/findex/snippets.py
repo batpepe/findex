@@ -95,3 +95,17 @@ def make_snippet(text: str, terms: Collection[str], width: int = 80, max_hits: i
     if fragments and not fragments[0][1]:
         fragments[0] = (fragments[0][0].lstrip(), False)
     return Snippet(tuple((t, hit) for t, hit in fragments if t))
+
+
+def highlight_html(text: str, terms: Collection[str]) -> str:
+    """The whole text as escaped HTML with the query terms in ``<mark>``; whitespace kept."""
+    shown = display_text(text)
+    parts: list[str] = []
+    cursor = 0
+    for token, start, end in token_spans(shown):
+        if token in terms:
+            parts.append(html.escape(shown[cursor:start]))
+            parts.append(f"<mark>{html.escape(shown[start:end])}</mark>")
+            cursor = end
+    parts.append(html.escape(shown[cursor:]))
+    return "".join(parts)
