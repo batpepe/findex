@@ -492,3 +492,17 @@ users hit (bad query, missing index) than chase the last 6%.
   wheel and installs it with `uv tool install`.
 - **Release v0.4.0** with the wheel attached:
   [github.com/batpepe/findex/releases/tag/v0.4.0](https://github.com/batpepe/findex/releases/tag/v0.4.0).
+- **Install-from-release verified in a fresh container** (nothing from this machine inside it):
+
+  ```text
+  $ docker run --rm python:3.14-slim sh -c 'pip install -q uv && \
+      uv tool install https://github.com/batpepe/findex/releases/download/v0.4.0/findex-0.4.0-py3-none-any.whl && \
+      PATH="$HOME/.local/bin:$PATH" findex --version'
+  findex 0.4.0
+  ```
+
+**What I learned.** Type hints cost nothing at runtime and catch real bugs before running anything — but
+they also have consumers I had not thought of (typer and dataclasses read them; typer cannot read a PEP 695
+alias). Example tests check what I thought of; one Hypothesis property found a Unicode case I would never
+have written down, and it was a genuine disagreement between two halves of the program. And "shipped" means
+a stranger's clean machine can run it from one command — which I only know because I tried it.
