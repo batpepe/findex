@@ -20,8 +20,9 @@ import logging
 import time
 import tracemalloc
 import zlib
+from array import array
 from collections import Counter, defaultdict
-from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import islice
@@ -65,6 +66,60 @@ class CompressedTexts:
 
     def text(self, doc_id: int) -> str:
         return zlib.decompress(self.blobs[doc_id]).decode()
+
+
+type RawPostings = tuple[Sequence[int], Sequence[int], Sequence[int] | None]  # doc_ids, tfs, positions
+
+
+def decode_postings(
+    doc_ids: Sequence[int], tfs: Sequence[int], positions: Sequence[int] | None
+) -> list[Posting]:
+    """Rebuild ``Posting`` objects from parallel uint32 arrays (positions concatenated in order)."""
+    if positions is None:
+        return [Posting(doc_id, tf) for doc_id, tf in zip(doc_ids, tfs, strict=True)]
+    plist: list[Posting] = []
+    cursor = 0
+    for doc_id, tf in zip(doc_ids, tfs, strict=True):
+        plist.append(Posting(doc_id, tf, tuple(positions[cursor : cursor + tf])))
+        cursor += tf
+    return plist
+
+
+class ArrayPostings(Mapping[str, list[Posting]]):
+    """In-memory postings as ``uint32`` arrays: what parallel builds produce (Lab 5).
+
+    The Lab 2 memory study put to work: 8 bytes per posting (plus positions)
+    instead of a 56-byte object, and nothing but raw buffers to pickle when a
+    worker process sends its partial index back.
+    """
+
+    def __init__(
+        self, arrays: dict[str, tuple[array[int], array[int], array[int]]], has_positions: bool
+    ) -> None:
+        self._arrays = arrays
+        self._has_positions = has_positions
+
+    def raw(self, term: str) -> RawPostings:
+        doc_ids, tfs, positions = self._arrays[term]
+        return doc_ids, tfs, positions if self._has_positions else None
+
+    def __getitem__(self, term: str) -> list[Posting]:
+        return decode_postings(*self.raw(term))
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._arrays)
+
+    def __len__(self) -> int:
+        return len(self._arrays)
+
+    def __contains__(self, term: object) -> bool:
+        return term in self._arrays
+
+    def df(self, term: str) -> int:
+        return len(self._arrays[term][0])
+
+    def cf(self, term: str) -> int:
+        return sum(self._arrays[term][1])
 
 
 class Index(Mapping[str, list[Posting]]):

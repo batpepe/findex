@@ -12,6 +12,7 @@ and one piece of the engine; every lab is tagged (`lab-01`, `lab-02`, …) so th
 | 2 | Dicts, hashing, memory | inverted index, Boolean search, two on-disk formats | `lab-02` |
 | 3 | The data model, decorators | `Index` object, BM25/TF-IDF, query language, snippets, precision@5 | `lab-03` |
 | 4 | Typing, testing, packaging | `findex` CLI (typer + rich), pyright strict, 77 tests, CI, v0.4.0 wheel | `lab-04` |
+| 5 | Concurrency and the GIL | parallel indexing: serial / threads / processes / free-threaded, benchmarked | `lab-05` |
 
 ## Quick start
 
@@ -506,3 +507,136 @@ they also have consumers I had not thought of (typer and dataclasses read them; 
 alias). Example tests check what I thought of; one Hypothesis property found a Unicode case I would never
 have written down, and it was a genuine disagreement between two halves of the program. And "shipped" means
 a stranger's clean machine can run it from one command — which I only know because I tried it.
+
+---
+
+## Lab 5 — Concurrency and the GIL
+
+**Built:** `findex.parallel` — map/reduce indexing.
+
+- **Map:** `build_partial(paths, root)` is a module-level (so: picklable) function that indexes a
+  contiguous chunk of corpus *files* and returns a `PartialIndex` made only of `array('I')` buffers
+  (`doc_ids`, `tfs`, concatenated positions), compressed texts and short lists — Lab 2's compact
+  representation, now justified twice: it is small in memory *and* it pickles as raw bytes. Workers receive
+  paths, never documents.
+- **Reduce:** `merge(partials)` concatenates every term's arrays in chunk order. Each partial numbers its
+  documents from 0 and the merge shifts them by the documents in earlier chunks, so the final ids are
+  exactly those of the serial walk. (Ranges can't be fixed up front: a JSON-lines file holds an unknown
+  number of documents.) Contiguous chunks of the sorted path list keep every merged postings list sorted.
+- **Chunking by bytes, not by count** (`chunk_paths`): the changelog is 2.4 MB, the median document 15 KB.
+  Parallel runs use 4 chunks per worker so a slow chunk doesn't leave the other workers idle.
+- **One flag, three executors:** `findex index data/ --executor {serial,threads,processes} --workers N`. The
+  same `build_partial`/`merge` run in a loop, a `ThreadPoolExecutor` or a `ProcessPoolExecutor`. Results
+  are collected in submission order; a worker's exception re-raises in the parent with the worker's
+  traceback attached, and the pool is shut down with `cancel_futures=True` — no hang, no waiting for chunks
+  nobody will merge (tested with an unreadable file, for threads and processes).
+- **Byte-identical:** a test builds the fixture corpus with serial, threads (1 and 3 workers) and processes
+  and compares the saved files byte for byte with Lab 4's `build_index`; on the real corpus `cmp` agrees.
+- **spawn-safe:** macOS starts workers with `spawn` — a fresh interpreter that re-imports the main module.
+  `python -m findex` therefore guards `app()` with `if __name__ == "__main__"`, and the console-script entry
+  point is guarded by construction. (I hit the failure mode for real: a benchmark piped into `python -` from
+  stdin crashed every worker with `FileNotFoundError: '<stdin>'` — a spawned child cannot re-import a script
+  that has no file.)
+- **Default:** `processes` with at most 8 workers on a normal build — it wins below — and `threads` when
+  `sys._is_gil_enabled()` is false.
+
+### The benchmark
+
+Machine: Apple M4 (10 cores = 4 performance + 6 efficiency), 16 GB, macOS 27.0.1, on power; Python 3.14.5
+(GIL) and 3.14.6 free-threaded (`uv python install 3.14t`, separate venv). Task: build the full index
+(1,297 documents, positions + compressed texts, no save). Every configuration ran 3 times, each in a fresh
+child process; medians, with min–max for wall time. CPU = user + system of the parent **and** its worker
+processes; RSS = peak of the parent; merge = the reduce step alone.
+`uv run python scripts/bench_parallel.py data/ --ft .venv-ft/bin/python`:
+
+| Executor | Workers | Wall (s, median, min–max) | CPU (s) | Peak RSS | Merge (s) | Speedup |
+|---|---|---|---|---|---|---|
+| serial | 1 | 2.08 (2.08–2.10) | 2.14 | 136 MiB | 0.01 | 1.00× |
+| threads | 1 | 2.18 (2.18–2.20) | 2.24 | 168 MiB | 0.09 | 0.95× |
+| threads | 2 | 1.86 (1.83–1.86) | 2.38 | 186 MiB | 0.08 | 1.12× |
+| threads | 4 | 1.93 (1.91–1.99) | 2.57 | 209 MiB | 0.11 | 1.08× |
+| threads | 8 | 2.07 (2.07–2.07) | 2.74 | 236 MiB | 0.14 | 1.01× |
+| threads | 10 | 2.14 (2.13–2.17) | 2.76 | 244 MiB | 0.14 | 0.97× |
+| processes | 1 | 2.59 (2.58–2.60) | 2.73 | 204 MiB | 0.16 | 0.80× |
+| processes | 2 | 1.62 (1.62–1.63) | 3.06 | 219 MiB | 0.14 | 1.28× |
+| processes | 4 | 1.30 (1.30–1.31) | 3.49 | 210 MiB | 0.21 | 1.60× |
+| processes | 8 | **1.15** (1.14–1.16) | 5.14 | 236 MiB | 0.17 | **1.81×** |
+| processes | 10 | 1.22 (1.22–1.22) | 5.67 | 247 MiB | 0.21 | 1.70× |
+| threads, 3.14t (no GIL) | 1 | 2.08 (2.04–2.12) | 2.31 | 177 MiB | 0.06 | 1.00× |
+| threads, 3.14t (no GIL) | 2 | 1.22 (1.21–1.23) | 2.42 | 220 MiB | 0.09 | 1.70× |
+| threads, 3.14t (no GIL) | 4 | **0.91** (0.90–0.91) | 2.60 | 239 MiB | 0.11 | **2.29×** |
+| threads, 3.14t (no GIL) | 8 | 1.07 (1.07–1.08) | 5.62 | 300 MiB | 0.14 | 1.94× |
+| threads, 3.14t (no GIL) | 10 | 1.17 (1.17–1.18) | 7.37 | 319 MiB | 0.13 | 1.77× |
+
+![speedup vs workers](docs/speedup.png)
+
+### What the numbers say
+
+**Threads under the GIL did not scale, because indexing is CPU-bound Python.** Only the thread holding
+the GIL executes bytecode; tokenizing (a regex scan, a `casefold`, a dict update per token) never waits
+for anything, so it never gives the GIL up except when the interpreter forces a switch every 5 ms. Eight
+threads take turns on one core's worth of work, and the CPU column grows (2.14 → 2.76 s) from the switching
+and contention. The only overlap — the 1.12× at two threads — is the work done in C *with the GIL
+released*: `zlib.compress` of each document's text and the file reads.
+
+**Processes scaled — and cost.** Each process has its own interpreter and its own GIL, so tokenizing really
+runs on 8 cores: 1.81× at 8 workers. The price is visible in three columns. *CPU* rose from 2.14 to 5.14 s:
+eight interpreters starting and importing `findex` (0.14 s of wall time, more of CPU), pickling, and work
+on the efficiency cores, which need more cycles for the same instructions. *RSS* rose by 100 MiB in the
+parent alone, which receives every partial. And **the pickling tax**: the 32 partials are 47.4 MiB of
+pickles — 0.31 s to dump in the workers, **0.19 s to load in the parent, sequentially**
+(`scripts/analyze_parallel.py`). Shipping arrays instead of `Posting` objects is what keeps this small:
+Lab 2 measured slotted dataclasses at 7× slower to unpickle.
+
+**Amdahl's law, in my own timings.** With 8 processes the strictly sequential part is pool start-up (0.14 s)
++ unpickling (0.19 s) + merge (0.17 s) ≈ 0.5 s of the 2.08 s serial run, i.e. ~24%: no number of cores can
+beat 1 / 0.24 ≈ 4.2×. And one *document* cannot be split: the chunk holding the 2.4 MB changelog takes
+0.34 s on its own, so the map phase can't end before it — together that caps this corpus at ~2.4×, and
+the measured 1.81× is mostly that ceiling plus efficiency cores past 4 workers. Going from 8 to 10 workers
+made it *slower* (1.22 s): the last two are E-cores, and more chunks mean more to pickle and merge.
+
+**Free-threaded 3.14t: the same threaded code, now parallel.** With the GIL disabled, threads execute
+bytecode simultaneously and share memory — no start-up, no pickling, no copy of partials — so 4 threads
+reach **2.29×** (0.91 s), better than any process count. The single-thread overhead of the no-GIL build is
+negligible here (2.08 s vs 2.08 s). Past 4 workers it degrades and the CPU column doubles (2.60 → 5.62 s):
+the threads land on efficiency cores, and they contend on shared objects (every thread increments the
+reference counts of the same compiled regex, module globals and interned strings, which the free-threaded
+runtime must do atomically).
+
+**The race the GIL was hiding.** My indexer was correct on 3.14t at the first run because it shares
+nothing: each worker fills its own `PartialIndex`, and only finished partials cross threads. To see what
+would have happened otherwise I wrote the naive version — four threads counting the corpus' tokens into
+*one shared* `Counter` (`scripts/race_demo.py`, 4,152,788 tokens expected):
+
+| Variant | GIL build (3.14.5) | Free-threaded (3.14.6t) |
+|---|---|---|
+| `shared[token] += 1` on one Counter | 4,152,788 — ok (0.36 s) | **4,108,690 — lost 44,098** (0.69 s) |
+| `shared.update(tokens)` on one Counter | 4,152,788 — ok (0.17 s) | **3,810,800 — lost 341,988** (0.35 s) |
+| one Counter per thread, merged after `join` | 4,152,788 — ok (0.20 s) | 4,152,788 — ok (**0.11 s**) |
+| `+=` under a `threading.Lock` | 4,152,788 — ok (0.51 s) | 4,152,788 — ok (1.02 s) |
+
+`counter[k] += 1` is a read, an add and a write — three bytecodes on 3.14 (`BINARY_OP 26 ([])`,
+`BINARY_OP 13 (+=)`, `STORE_SUBSCR`); two threads that read the same old value both write `old + 1`, and one increment
+vanishes. Under the GIL a switch inside that window is rare enough that every run came out right, which
+means the code was *wrong but lucky*. Without the GIL it lost 1% of the updates — and `Counter.update`,
+whose C loop does the same get-then-set per element, lost 8%. The fix is not the lock (correct, and the
+slowest of all: every token now serializes on it) but **not sharing**: per-thread counters merged at the end,
+which is also the fastest variant — the same design `build_partial`/`merge` uses.
+
+**The counter-example: I/O-bound work, where plain GIL threads do scale.** Fetching 40 pages of the
+library reference from docs.python.org (`scripts/bench_io_threads.py`, after an untimed warm-up pass):
+
+| Threads | Pages | Wall (s) | Speedup |
+|---|---|---|---|
+| 1 | 40 (2.7 MiB) | 10.49 | 1.0× |
+| 4 | 40 (2.7 MiB) | 2.65 | 4.0× |
+| 16 | 40 (2.7 MiB) | 0.85 | 12.3× |
+
+A thread waiting on a socket has released the GIL, so 16 threads overlap 16 waits on one core. Same
+interpreter, same GIL, opposite result — the question is never "threads or processes" but "what is my
+program waiting for". Thousands of such waits, with no thread per request, is Lab 6.
+
+**What I learned.** The GIL protects the interpreter, not my invariants: code can be correct by luck under
+it. Parallel speedup is bounded by everything that stays sequential — start-up, data transfer, the merge,
+and the largest indivisible task — and I can only see those by measuring them separately. The cheapest
+synchronization is none: design the data so workers never share mutable state.

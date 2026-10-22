@@ -34,11 +34,11 @@ import struct
 import sys
 import zlib
 from array import array
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
-from findex.index import CompressedTexts, DocMeta, Index, Posting
+from findex.index import CompressedTexts, DocMeta, Index, Posting, RawPostings, decode_postings
 from findex.timing import timed
 
 type Format = Literal["binary", "pickle"]
@@ -110,14 +110,23 @@ def _blob(index: Index, doc_id: int) -> bytes:
     return zlib.compress(index.text(doc_id).encode(), 6)
 
 
+def _raw(index: Index, term: str) -> RawPostings:
+    """A term's postings as three ``uint32`` sequences, decoding objects only if we must."""
+    raw = getattr(index.postings, "raw", None)  # ArrayPostings / MappedPostings: no objects at all
+    if raw is not None:
+        return raw(term)
+    plist = index[term]
+    positions = array("I", (pos for p in plist for pos in p.positions)) if index.has_positions else None
+    return array("I", (p.doc_id for p in plist)), array("I", (p.tf for p in plist)), positions
+
+
 def save_binary(index: Index, path: Path) -> None:
     terms: dict[str, list[int]] = {}
     offset = 0
     for term in sorted(index):  # sorted: the same index always gives the same bytes
-        plist = index[term]
-        total_tf = sum(p.tf for p in plist)
-        terms[term] = [offset, len(plist), total_tf]
-        offset += 4 * (2 * len(plist) + (total_tf if index.has_positions else 0))
+        df, total_tf = index.df(term), index.cf(term)
+        terms[term] = [offset, df, total_tf]
+        offset += 4 * (2 * df + (total_tf if index.has_positions else 0))
     postings_size = offset
 
     docs: list[list[Any]] = []
@@ -143,14 +152,20 @@ def save_binary(index: Index, path: Path) -> None:
         f.write(header_bytes)
         f.write(b"\0" * padding)
         for term in terms:
-            plist = index[term]
-            array("I", (p.doc_id for p in plist)).tofile(f)
-            array("I", (p.tf for p in plist)).tofile(f)
-            if index.has_positions:
-                array("I", (pos for p in plist for pos in p.positions)).tofile(f)
+            doc_ids, tfs, positions = _raw(index, term)
+            f.write(_as_u32_bytes(doc_ids))
+            f.write(_as_u32_bytes(tfs))
+            if positions is not None:
+                f.write(_as_u32_bytes(positions))
         if index.texts is not None:
             for doc_id, *_ in docs:
                 f.write(_blob(index, doc_id))
+
+
+def _as_u32_bytes(values: Sequence[int]) -> bytes | memoryview | array[int]:
+    if isinstance(values, (memoryview, array)):  # already uint32 buffers: written as they are
+        return values
+    return array("I", values)
 
 
 def load_binary(path: Path) -> Index:
@@ -193,27 +208,18 @@ class MappedPostings(Mapping[str, list[Posting]]):
         self._terms = terms
         self._has_positions = has_positions
 
-    def arrays(self, term: str) -> tuple[memoryview, memoryview]:
-        """Zero-copy ``uint32`` views of a term's doc ids and term frequencies."""
-        offset, df, _ = self._terms[term]
+    def raw(self, term: str) -> RawPostings:
+        """Zero-copy ``uint32`` views of a term's doc ids, tfs and (if stored) positions."""
+        offset, df, total_tf = self._terms[term]  # KeyError for unknown terms, like a dict
         start = self._data_start + offset
-        return self._view[start : start + 4 * df].cast("I"), self._view[start + 4 * df : start + 8 * df].cast(
-            "I"
-        )
+        doc_ids = self._view[start : start + 4 * df].cast("I")
+        tfs = self._view[start + 4 * df : start + 8 * df].cast("I")
+        if not self._has_positions:
+            return doc_ids, tfs, None
+        return doc_ids, tfs, self._view[start + 8 * df : start + 8 * df + 4 * total_tf].cast("I")
 
     def __getitem__(self, term: str) -> list[Posting]:
-        offset, df, total_tf = self._terms[term]  # KeyError for unknown terms, like a dict
-        doc_ids, tfs = self.arrays(term)
-        if not self._has_positions:
-            return [Posting(doc_id, tf) for doc_id, tf in zip(doc_ids, tfs, strict=True)]
-        start = self._data_start + offset + 8 * df
-        flat = self._view[start : start + 4 * total_tf].cast("I")
-        plist: list[Posting] = []
-        cursor = 0
-        for doc_id, tf in zip(doc_ids, tfs, strict=True):
-            plist.append(Posting(doc_id, tf, tuple(flat[cursor : cursor + tf])))
-            cursor += tf
-        return plist
+        return decode_postings(*self.raw(term))
 
     def __iter__(self) -> Iterator[str]:
         return iter(self._terms)

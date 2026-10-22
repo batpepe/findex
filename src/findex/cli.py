@@ -30,6 +30,7 @@ from rich.text import Text
 from findex import __version__
 from findex.corpus import Document, iter_documents
 from findex.index import Index, build_index
+from findex.parallel import DEFAULT_WORKERS, build_parallel, default_executor
 from findex.query import QueryError
 from findex.rank import SCORERS, Searcher
 from findex.store import load, save
@@ -44,6 +45,12 @@ app = typer.Typer(
 )
 out = Console()  # data
 err = Console(stderr=True)  # everything else
+
+
+class ExecutorChoice(StrEnum):
+    serial = "serial"
+    threads = "threads"
+    processes = "processes"
 
 
 class FormatName(StrEnum):
@@ -108,14 +115,24 @@ def index(
         "index.bin"
     ),
     positions: Annotated[bool, typer.Option(help="Store token positions (phrase queries).")] = True,
-    limit: Annotated[int | None, typer.Option(help="Only the first N documents.", min=1)] = None,
+    limit: Annotated[
+        int | None, typer.Option(help="Only the first N documents (streams serially).", min=1)
+    ] = None,
     fmt: Annotated[
         FormatName, typer.Option("--format", help="binary (mmap, default) or pickle.")
     ] = FormatName.binary,
+    executor: Annotated[
+        ExecutorChoice | None,
+        typer.Option(help="serial, threads or processes [default: processes; threads on a no-GIL build]"),
+    ] = None,
+    workers: Annotated[
+        int, typer.Option(min=1, help="Worker threads/processes [default: CPU count, at most 8].")
+    ] = DEFAULT_WORKERS,
 ) -> None:
     """Build an inverted index from a corpus and save it."""
     if not corpus.exists():
         raise _fail(f"corpus not found: {corpus}")
+    chosen = executor.value if executor else default_executor()
     t0 = time.perf_counter()
     with Progress(
         SpinnerColumn(),
@@ -125,12 +142,23 @@ def index(
         transient=True,
     ) as progress:
         task = progress.add_task("index", total=None)
-        docs = _counting(islice(iter_documents(corpus), limit), progress, task)
-        idx = build_index(docs, positions=positions)
+        if limit is not None:  # "the first N documents" needs the single ordered stream
+            chosen = "serial"
+            docs = _counting(islice(iter_documents(corpus), limit), progress, task)
+            idx = build_index(docs, positions=positions)
+        else:
+            idx = build_parallel(
+                corpus,
+                executor=chosen,
+                workers=workers,
+                positions=positions,
+                on_partial=lambda part: progress.advance(task, part.num_docs),
+            )
     save(idx, out_path, fmt.value)
     size = out_path.stat().st_size / 2**20
     err.print(
         f"indexed {idx.num_docs:,} documents, {len(idx):,} terms in {time.perf_counter() - t0:.1f} s "
+        f"({chosen}{'' if chosen == 'serial' else f', {workers} workers'}) "
         f"-> {out_path} ({size:.1f} MiB, {fmt.value})",
         highlight=False,
     )

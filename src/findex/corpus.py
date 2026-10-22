@@ -38,14 +38,14 @@ class Document(NamedTuple):
 def iter_documents(root: Path) -> Iterator[Document]:
     """Yield every document under ``root`` lazily, assigning sequential ids."""
     doc_id = 0
-    for path in _walk(root):
-        for rel_path, title, text in _read_source(path, root):
+    for path in iter_paths(root):
+        for rel_path, title, text in read_source(path, root):
             yield Document(doc_id, rel_path, title, text)
             doc_id += 1
 
 
-def _walk(root: Path) -> Iterator[Path]:
-    """Recursive, sorted, lazy directory walk (``rglob`` order is not stable)."""
+def iter_paths(root: Path) -> Iterator[Path]:
+    """Every corpus file under ``root``: recursive, sorted, lazy (``rglob`` order is not stable)."""
     if root.is_file():
         yield root
         return
@@ -55,7 +55,7 @@ def _walk(root: Path) -> Iterator[Path]:
         if entry.name.startswith("."):
             continue
         if entry.is_dir():
-            yield from _walk(Path(entry.path))
+            yield from iter_paths(Path(entry.path))
         elif _is_supported(entry.name):
             yield Path(entry.path)
 
@@ -64,7 +64,7 @@ def _is_supported(name: str) -> bool:
     return name.endswith((".jsonl", ".jsonl.gz")) or Path(name).suffix in TEXT_SUFFIXES
 
 
-def _read_source(path: Path, root: Path) -> Iterator[tuple[str, str, str]]:
+def read_source(path: Path, root: Path) -> Iterator[tuple[str, str, str]]:
     """Yield ``(path, title, text)`` for every document stored in one file."""
     rel_path = path.relative_to(root).as_posix() if path != root else path.name
     if path.name.endswith((".jsonl", ".jsonl.gz")):

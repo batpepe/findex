@@ -23,3 +23,4 @@ htmlcov/
 # local notes (defense prep, not part of the project)
 notes/
 .DS_Store
+.venv-ft/

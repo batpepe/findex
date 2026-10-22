@@ -2,4 +2,5 @@
 
 from findex.cli import app
 
-app()
+if __name__ == "__main__":  # required: under "spawn", worker processes re-import this module
+    app()
