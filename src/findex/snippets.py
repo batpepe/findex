@@ -23,6 +23,15 @@ class Snippet:
     def __str__(self) -> str:
         return "".join(f"**{text}**" if hit else text for text, hit in self.fragments)
 
+    @property
+    def text(self) -> str:
+        """The snippet without any highlighting."""
+        return "".join(text for text, _ in self.fragments)
+
+    @property
+    def highlights(self) -> list[str]:
+        return [text for text, hit in self.fragments if hit]
+
     def html(self) -> str:
         return "".join(
             f"<mark>{html.escape(text)}</mark>" if hit else html.escape(text) for text, hit in self.fragments

@@ -227,6 +227,9 @@ class MappedPostings(Mapping[str, list[Posting]]):
     def df(self, term: str) -> int:
         return self._terms[term][1]
 
+    def cf(self, term: str) -> int:
+        return self._terms[term][2]
+
 
 class MappedTexts:
     """Compressed document texts read straight from the memory-mapped file."""

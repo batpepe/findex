@@ -18,7 +18,7 @@ from collections import defaultdict
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from operator import itemgetter
-from typing import Protocol, overload
+from typing import NamedTuple, Protocol, overload
 
 from findex.index import Index, Posting
 from findex.query import Node, parse, positive_terms
@@ -158,7 +158,7 @@ class Searcher:
         scorer = scorer or SCORERS["bm25"]
         total, top = self._ranked(query, scorer, k)
         log.debug("query cache: %s", self._ranked.cache_info())
-        terms = frozenset(positive_terms(parse(query))) if snippets else frozenset()
+        terms = frozenset(positive_terms(parse(query))) if snippets else frozenset[str]()
         results = [
             SearchResult(
                 score,
@@ -171,8 +171,15 @@ class Searcher:
         ]
         return ResultList(results, total, query)
 
-    def cache_info(self) -> functools._CacheInfo:
-        return self._ranked.cache_info()
+    def cache_info(self) -> CacheStats:
+        info = self._ranked.cache_info()
+        return CacheStats(info.hits, info.misses, info.currsize)
+
+
+class CacheStats(NamedTuple):
+    hits: int
+    misses: int
+    size: int
 
 
 def search(index: Index, query: str, scorer: Scorer | None = None, k: int = 10) -> ResultList:

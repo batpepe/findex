@@ -14,6 +14,7 @@ import statistics
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from findex.corpus import iter_documents
@@ -24,9 +25,9 @@ from findex.store import Format, load, save
 QUERY = "asyncio event loop"
 
 
-def timed(fn: object) -> float:
+def timed(fn: Callable[[], object]) -> float:
     t0 = time.perf_counter()
-    fn()  # type: ignore[operator]
+    fn()
     return time.perf_counter() - t0
 
 

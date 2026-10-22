@@ -8,8 +8,8 @@ import pytest
 from findex.corpus import Document
 from findex.index import DocMeta, Index, Posting, build_index, open_index
 from findex.merge import SET_OPS, difference, intersect, union
-from findex.search import boolean_search
-from findex.store import MappedPostings, load, save
+from findex.search import Engine, boolean_search
+from findex.store import Format, MappedPostings, load, save
 
 DOCS = [
     Document(0, "a.txt", "A", "the cat sat on the mat"),
@@ -67,7 +67,7 @@ def test_merges_agree_with_python_sets() -> None:
 
 
 @pytest.mark.parametrize("engine", ["merge", "set"])
-def test_boolean_queries(index: Index, engine: str) -> None:
+def test_boolean_queries(index: Index, engine: Engine) -> None:
     assert boolean_search(index, "cat", engine) == [0, 2]
     assert boolean_search(index, "cat dog", engine) == [2]
     assert boolean_search(index, "cat OR dog", engine) == [0, 1, 2]
@@ -78,7 +78,7 @@ def test_boolean_queries(index: Index, engine: str) -> None:
 
 
 @pytest.mark.parametrize("fmt", ["binary", "pickle"])
-def test_save_load_round_trip(index: Index, tmp_path: Path, fmt: str) -> None:
+def test_save_load_round_trip(index: Index, tmp_path: Path, fmt: Format) -> None:
     path = tmp_path / f"index.{fmt}"
     save(index, path, fmt)
     with open_index(path) as loaded:

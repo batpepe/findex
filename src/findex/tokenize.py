@@ -2,10 +2,14 @@
 
 Policy (documented here and in the README, tested in tests/test_tokenize.py):
 
-1. Unicode: the text is NFC-normalized, then ``casefold()``-ed (``ß`` -> ``ss``,
-   ``Σ``/``ς`` -> ``σ``), then NFC-normalized again because case folding can
-   produce decomposed sequences. Typographic and Ukrainian apostrophes
-   (``’`` U+2019, ``ʼ`` U+02BC, ``‘`` U+2018, ``＇`` U+FF07) become ASCII ``'``.
+1. Unicode: the text is NFC-normalized and typographic and Ukrainian
+   apostrophes (``’`` U+2019, ``ʼ`` U+02BC, ``‘`` U+2018, ``＇`` U+FF07) become
+   ASCII ``'``. Words are found in *that* text; each word is then
+   ``casefold()``-ed (``ß`` -> ``ss``, ``Σ``/``ς`` -> ``σ``) and NFC-normalized
+   again, because case folding can produce decomposed sequences.
+   (Folding *before* splitting, as Lab 1 did, lets folding change what counts
+   as a word: U+0345, a combining mark, folds to the letter ``ι``. Hypothesis
+   found that in Lab 4.)
 2. A token is a run of Unicode word characters (``\\w``: letters and digits of
    any script, plus ``_``) together with combining marks, starting with a word
    character.
@@ -28,48 +32,50 @@ import re
 import unicodedata
 from collections.abc import Iterator
 
-_APOSTROPHES = str.maketrans({"\u2019": "'", "\u02bc": "'", "\u2018": "'", "\uff07": "'"})
+_APOSTROPHES = str.maketrans({"’": "'", "ʼ": "'", "‘": "'", "＇": "'"})
 
 # Combining marks that may follow a letter when NFC has no precomposed form.
-_MARKS = "\u0300-\u036f\u0483-\u0489\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f"
+_MARKS = "̀-ͯ҃-҉᪰-᫿᷀-᷿⃐-⃿︠-︯"
 _WORD = rf"\w[\w{_MARKS}]*"
 WORD_RE = re.compile(rf"{_WORD}(?:'{_WORD})*")
 
 
-def normalize_text(text: str) -> str:
-    """NFC + casefold + unified apostrophes: the form every token is taken from."""
-    text = unicodedata.normalize("NFC", text).casefold()
-    if not text.isascii():
-        text = unicodedata.normalize("NFC", text.translate(_APOSTROPHES))
-    return text
+def display_text(text: str) -> str:
+    """NFC + unified apostrophes, *not* case-folded: where words are found.
+
+    Both steps keep one character per character, so offsets found in this string
+    can be shown to the user (snippets), which is not true after ``casefold``.
+    """
+    text = unicodedata.normalize("NFC", text)
+    return text if text.isascii() else text.translate(_APOSTROPHES)
 
 
 def tokenize(text: str) -> Iterator[str]:
     """Yield normalized tokens of ``text`` one at a time (``re.finditer``, not ``findall``)."""
-    for match in WORD_RE.finditer(normalize_text(text)):
-        token = match.group()
+    shown = display_text(text)
+    if shown.isascii():  # O(1) flag check; for ASCII, lower() == casefold(): fold once, in C
+        for match in WORD_RE.finditer(shown.lower()):
+            token = match.group()
+            if token.endswith("'s"):
+                token = token[:-2]
+            if token.strip("_"):
+                yield token
+        return
+    for match in WORD_RE.finditer(shown):
+        token = unicodedata.normalize("NFC", match.group().casefold())
         if token.endswith("'s"):
             token = token[:-2]
         if token.strip("_"):
             yield token
 
 
-def display_text(text: str) -> str:
-    """NFC + unified apostrophes but *not* case-folded: the text to cut snippets from.
-
-    Both steps keep one character per character, so offsets found in this string
-    can be shown to the user, which is not true after ``casefold`` (``ß`` -> ``ss``).
-    """
-    text = unicodedata.normalize("NFC", text)
-    return text if text.isascii() else text.translate(_APOSTROPHES)
-
-
 def token_spans(shown: str) -> Iterator[tuple[str, int, int]]:
-    """``(token, start, end)`` for a ``display_text`` string; same tokens as ``tokenize``."""
-    for match in WORD_RE.finditer(shown):
-        token = match.group().casefold()
-        if not token.isascii():
-            token = unicodedata.normalize("NFC", token)
+    """``(token, start, end)`` for a ``display_text`` string; the same tokens as ``tokenize``."""
+    folded = shown.lower() if shown.isascii() else None
+    for match in WORD_RE.finditer(folded if folded is not None else shown):
+        token = (
+            match.group() if folded is not None else unicodedata.normalize("NFC", match.group().casefold())
+        )
         if token.endswith("'s"):
             token = token[:-2]
         if token.strip("_"):

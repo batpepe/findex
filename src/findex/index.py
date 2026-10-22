@@ -21,7 +21,7 @@ import time
 import tracemalloc
 import zlib
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import islice
@@ -133,6 +133,13 @@ class Index(Mapping[str, list[Posting]]):
             return df(term) if term in self._postings else 0
         return len(self._postings.get(term, ()))
 
+    def cf(self, term: str) -> int:
+        """Collection frequency: total occurrences of the term in the whole corpus."""
+        cf = getattr(self._postings, "cf", None)
+        if cf is not None:
+            return cf(term) if term in self._postings else 0
+        return sum(p.tf for p in self._postings.get(term, ()))
+
     def title(self, doc_id: int) -> str:
         return self.doc_meta[doc_id].title
 
@@ -186,7 +193,7 @@ def build_index(docs: Iterable[Document], *, positions: bool = False, store_text
 
 
 @contextmanager
-def open_index(path: Path) -> Iterator[Index]:
+def open_index(path: Path) -> Generator[Index]:
     """``with open_index(p) as ix:`` - the memory map is released even if the body raises."""
     from findex.store import load  # imported here: store itself imports this module
 

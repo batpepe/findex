@@ -12,19 +12,20 @@ import sys
 import timeit
 from pathlib import Path
 
-from findex.search import MERGE_OPS, SET_OPS, doc_ids
+from findex.merge import MERGE_OPS, SET_OPS, SetOp
+from findex.search import doc_ids
 from findex.store import load
 
 
-def best_us(fn: object, a: list[int], b: list[int]) -> float:
+def best_us(fn: SetOp, a: list[int], b: list[int]) -> float:
     number = 2000
-    times = timeit.repeat(lambda: fn(a, b), number=number, repeat=5)  # type: ignore[operator]
+    times = timeit.repeat(lambda: fn(a, b), number=number, repeat=5)
     return min(times) / number * 1e6
 
 
 def main() -> None:
     index = load(Path(sys.argv[1] if len(sys.argv) > 1 else "index.bin"))
-    by_df = sorted(index.postings, key=lambda t: (len(index.postings[t]), t))
+    by_df = sorted(index, key=lambda t: (index.df(t), t))
     rare = [t for t in by_df if t.isalpha()][:2]
     common = by_df[-2:][::-1]
     pairs = {

@@ -29,8 +29,8 @@ def main() -> None:
         print("| Query | relevant | " + " | ".join(f"{n} P@5" for n in names) + " |")
         print("|---|---|" + "---|" * len(names))
         for item in labels["queries"]:
-            relevant = set(item["relevant"])
-            row = []
+            relevant: set[str] = set(item["relevant"])
+            row: list[str] = []
             for name in names:
                 top = searcher.search(item["query"], SCORERS[name], k=K, snippets=False)
                 p = sum(r.path in relevant for r in top) / K

@@ -1,5 +1,7 @@
 # findex
 
+[![CI](https://github.com/batpepe/findex/actions/workflows/ci.yml/badge.svg)](https://github.com/batpepe/findex/actions/workflows/ci.yml)
+
 A full-text search engine over the **Python documentation and every PEP**, built from scratch in Python
 over the eight labs of the *Python — Build a Search Engine* course. Each lab adds one language feature
 and one piece of the engine; every lab is tagged (`lab-01`, `lab-02`, …) so the history shows it growing.
@@ -9,17 +11,25 @@ and one piece of the engine; every lab is tagged (`lab-01`, `lab-02`, …) so th
 | 1 | Iterators & generators | streaming corpus, tokenizer, stats in constant memory | `lab-01` |
 | 2 | Dicts, hashing, memory | inverted index, Boolean search, two on-disk formats | `lab-02` |
 | 3 | The data model, decorators | `Index` object, BM25/TF-IDF, query language, snippets, precision@5 | `lab-03` |
+| 4 | Typing, testing, packaging | `findex` CLI (typer + rich), pyright strict, 77 tests, CI, v0.4.0 wheel | `lab-04` |
 
 ## Quick start
 
 ```bash
+# install the command (Python 3.14+); or from a clone: uv tool install .
+uv tool install https://github.com/batpepe/findex/releases/download/v0.4.0/findex-0.4.0-py3-none-any.whl
+
 git clone https://github.com/batpepe/findex && cd findex
-uv sync                                   # Python 3.14 + dev tools from uv.lock
-./scripts/get-corpus.sh                   # ~31 MB into data/ (git-ignored)
-uv run python -m findex.stats data/       # corpus statistics, lazily
-uv run python -m findex.index data/ --out index.bin --positions   # build + save the inverted index
-uv run python -m findex.search index.bin '"event loop" NOT asyncio' # ranked search with snippets
+./scripts/get-corpus.sh                      # ~31 MB into data/ (git-ignored)
+findex index data/ --out index.bin           # positions + texts, binary format
+findex search index.bin '"event loop" NOT asyncio'
+findex search index.bin 'TaskGroup' --json | jq .title
+findex stats index.bin
 ```
+
+Development: `uv sync`, then `uv run pytest`, `uv run ruff check .`, `uv run pyright`.
+The lab-by-lab entry points still work: `uv run python -m findex.stats data/`, `python -m findex.index`,
+`python -m findex.search`.
 
 ## The corpus
 
@@ -378,3 +388,107 @@ methods of `Mapping` bought a dozen behaviors. Decorators are just `f = timed(f)
 identity of what they wrap; `lru_cache` needs hashable arguments, which is one more reason the scorers
 are frozen dataclasses. And measuring ranking — even with ten queries — showed a problem (length
 normalization) that no unit test would have.
+
+---
+
+## Lab 4 — Make it a real tool
+
+**Built:** the `findex` command (`findex.cli`, typer + rich), installed by `[project.scripts] findex =
+"findex.cli:app"`:
+
+```text
+$ findex --help
+ Usage: findex [OPTIONS] COMMAND [ARGS]...
+
+ findex - full-text search over a corpus you choose.
+
+╭─ Options ────────────────────────────────────────────────────────────────╮
+│ --verbose             -v      <int>  -v: info, -vv: debug (timings), to  │
+│                                      stderr                              │
+│                                      [default: 0]                        │
+│ --version                            Show the version.                   │
+│ --install-completion                 Install completion for the current  │
+│                                      shell.                              │
+│ --show-completion                    Show completion for the current     │
+│                                      shell, to copy it or customize the  │
+│                                      installation.                       │
+│ --help                               Show this message and exit.         │
+╰──────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ───────────────────────────────────────────────────────────────╮
+│ index   Build an inverted index from a corpus and save it.               │
+│ search  Ranked search with highlighted snippets.                         │
+│ stats   Corpus and index statistics (the Lab 1 numbers, from the index). │
+╰──────────────────────────────────────────────────────────────────────────╯
+
+$ findex search index.bin "TaskGroup" -k 1 --json
+{"rank": 1, "doc_id": 935, "score": 11.1514, "title": "Command-line introspection tools", "path": "pydocs/library/asyncio-tools.txt", "snippet": "… Finished: {track}\") async def album(name, tracks): async with asyncio.TaskGroup() as tg: for track in tracks: tg.create_task(play(track), …", "highlights": ["TaskGroup"]}
+
+$ findex search index.bin "(event OR"; echo "exit $?"
+error: bad query: query ends where a term was expected
+exit 2
+```
+
+- `index` shows a rich progress counter on stderr; `search` prints a rich table with highlighted snippets,
+  or one JSON object per line with `--json`; `stats` prints the Lab 1 numbers from the index (collection
+  and document frequencies come from the binary header without decoding any postings).
+- **stdout is data, stderr is everything else.** Logging is configured once, in the CLI callback
+  (`-v` → INFO, `-vv` → DEBUG with the `@timed` lines); library modules only call
+  `logging.getLogger(__name__)`. Expected failures (missing index, bad query, old index format) print one
+  line and exit 1 or 2 — no tracebacks. A test asserts `stdout == ""` for `findex index`.
+
+### Typed: pyright strict, zero errors
+
+`[tool.pyright] typeCheckingMode = "strict"` over `src/`, `tests/` and `scripts/`: **0 errors**. Most of the
+code was annotated from Lab 1; strict mode found 12 issues, all real:
+
+- `@contextmanager` on a function annotated `-> Iterator[Index]` is deprecated in typeshed: the decorator
+  needs a `Generator` (it calls `.throw()` into it to deliver the `with` body's exception).
+- `frozenset()` without a type argument is `frozenset[Unknown]`; `functools._CacheInfo` is private (the
+  `Searcher` now returns its own `CacheStats` `NamedTuple`); tests passed plain `str` where a `Literal`
+  (`Engine`, `Format`) was required.
+- PEP 695 is used where it pays: `def timed[**P, R](fn: Callable[P, R]) -> Callable[P, R]` keeps the exact
+  signature of decorated functions, and `type Format = Literal["binary", "pickle"]`. `Scorer` is a
+  `typing.Protocol`: `TfIdf` and `BM25` satisfy it structurally, without inheriting anything.
+- One `# type: ignore` remains, in a test, on purpose: it assigns to a frozen dataclass to prove it raises.
+- One wrinkle: typer cannot read a PEP 695 `type` alias, so the CLI options use `StrEnum`s instead.
+
+### Tested: 77 tests, 7 properties, 94% coverage
+
+`uv run pytest` — **77 tests** (`-m "not slow"` skips the 2 slow ones during development), structured as
+the lab asks: a parametrized tokenizer table, a `conftest.py` fixture corpus with every input format (text
+tree, Markdown, PEP header, JSON-lines), index build, merges, parser trees, the three ranking sanity checks
+as tests, save/load round trips, the CLI through `typer.testing.CliRunner` (exit codes, `--json` parsing,
+stdout/stderr separation), and the old `python -m` entry points.
+
+**Seven Hypothesis properties** (`tests/test_properties.py`): tokenizing is idempotent; tokens are never
+empty or padded; `token_spans` (snippets) yields exactly the tokens `tokenize` (indexing) does; the
+merges equal the `set` oracle and stay sorted; `load(save(index)) == index` for random corpora with and
+without positions; and `parse(explain(tree)) == tree` for random query trees.
+
+**The bug Hypothesis found.** The third property failed within a second, on a one-character input:
+`'ͅ'` (COMBINING GREEK YPOGEGRAMMENI). It is a combining mark — not a word character — but
+`casefold()` turns it into the letter `ι`. Lab 1's tokenizer case-folded the whole text *before* finding
+words, so it produced a token `ι` from nothing, while the snippet code (which finds words first, to keep
+offsets) produced none: the index and the snippets disagreed about what a word is. The fix changed rule 1
+of the policy — find words in the NFC text, *then* case-fold each word — with an ASCII fast path
+(`str.isascii()` is an O(1) flag check, and for ASCII `lower() == casefold()`). On this corpus the tokens
+are identical (4,152,788, same vocabulary), and the lazy `stats` peak dropped from 41.2 to 16.6 MiB,
+because the 2.4 MB changelog is no longer copied whole three times.
+
+**Coverage:** `uv run pytest --cov` — **94%** of statements and branches (1,115 statements, branch
+coverage on). Not covered, and why: the `findex/__main__.py` shim (it only calls the app), the
+`PackageNotFoundError` fallback for a source tree that was never installed, the AND-fallback for phrase
+queries on an index built without positions, the error paths for corrupted or old-format index files, and
+a few defensive branches in the snippet window and the query parser. I would rather test the error paths
+users hit (bad query, missing index) than chase the last 6%.
+
+### Packaged, CI'd, released
+
+- `pyproject.toml` (PEP 621): metadata, MIT licence, runtime deps (`typer`, `rich`), a `dev` dependency
+  group, `[project.scripts]`, and the ruff / pyright / pytest / coverage configuration; `uv.lock` is
+  committed. `src/` layout: the tests import the installed package, never the working directory.
+- **CI** (`.github/workflows/ci.yml`) on every push and PR: ruff check + format, pyright strict, pytest
+  with coverage on **Python 3.14 and the free-threaded 3.14t** (ready for Lab 5), and a job that builds the
+  wheel and installs it with `uv tool install`.
+- **Release v0.4.0** with the wheel attached:
+  [github.com/batpepe/findex/releases/tag/v0.4.0](https://github.com/batpepe/findex/releases/tag/v0.4.0).

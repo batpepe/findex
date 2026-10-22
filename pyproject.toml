@@ -1,13 +1,32 @@
 [project]
 name = "findex"
-version = "0.1.0"
+version = "0.4.0"
 description = "A full-text search engine over the Python docs and PEPs, built in 8 labs"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "batpepe", email = "oskostya25@gmail.com" }
 ]
+keywords = ["search", "inverted-index", "bm25", "information-retrieval"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Text Processing :: Indexing",
+    "Typing :: Typed",
+]
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "rich>=15.0.0",
+    "typer>=0.27.3",
+]
+
+[project.urls]
+Repository = "https://github.com/batpepe/findex"
+
+[project.scripts]
+findex = "findex.cli:app"
 
 [build-system]
 requires = ["uv_build>=0.12.1,<0.13.0"]
@@ -15,7 +34,10 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "hypothesis>=6.170.5",
+    "pyright>=1.1.414",
     "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
     "ruff>=0.17.1",
 ]
 
@@ -26,7 +48,23 @@ target-version = "py314"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "PTH"]
 # the corpus and tests are deliberately multilingual
-allowed-confusables = ["σ", "ς", "Σ", "ʼ", "’", "‘", "＇", "і", "×"]
+allowed-confusables = ["σ", "ς", "Σ", "ι", "ʼ", "’", "‘", "＇", "і", "×"]
+
+[tool.pyright]
+include = ["src", "tests", "scripts"]
+typeCheckingMode = "strict"
+pythonVersion = "3.14"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = ["--strict-markers"]
+markers = ["slow: takes more than a second (deselect with -m 'not slow')"]
+
+[tool.coverage.run]
+source = ["findex"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_also = ["if __name__ == .__main__.:", "pragma: no cover", "raise NotImplementedError"]

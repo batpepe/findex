@@ -64,7 +64,7 @@ def child(kind: str, root: Path) -> None:
         path = Path(tmp) / "postings.pkl"
         with path.open("wb") as f:
             pickle.dump(postings, f, protocol=pickle.HIGHEST_PROTOCOL)
-        loads = []
+        loads: list[float] = []
         for _ in range(3):
             t0 = time.perf_counter()
             with path.open("rb") as f:

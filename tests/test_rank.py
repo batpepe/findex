@@ -26,11 +26,12 @@ def index() -> Index:
 
 
 def test_scorers_satisfy_the_protocol_and_are_callable(index: Index) -> None:
-    scorers: list[Scorer] = [TfIdf(), BM25()]
+    scorers: list[Scorer] = [TfIdf(), BM25()]  # pyright checks both against the Protocol here
     posting = index["walrus"][0]
-    for scorer in scorers:
-        assert scorer.score("walrus", posting, index) > 0
-        assert scorer("walrus", posting, index) == scorer.score("walrus", posting, index)  # type: ignore[operator]
+    assert all(scorer.score("walrus", posting, index) > 0 for scorer in scorers)
+    tfidf, bm25 = TfIdf(), BM25()
+    assert tfidf("walrus", posting, index) == tfidf.score("walrus", posting, index)
+    assert bm25("walrus", posting, index) == bm25.score("walrus", posting, index)
 
 
 @pytest.mark.parametrize("scorer", [TfIdf(), BM25()])
