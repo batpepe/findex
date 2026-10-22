@@ -18,8 +18,14 @@ classifiers = [
 ]
 requires-python = ">=3.14"
 dependencies = [
+    "fastapi>=0.159.1",
+    "httpx>=0.28.1",
+    "jinja2>=3.1.6",
+    "pydantic-settings>=2.16.1",
     "rich>=15.0.0",
+    "selectolax>=1.0.1",
     "typer>=0.27.3",
+    "uvicorn>=0.54.0",
 ]
 
 [project.urls]
@@ -34,6 +40,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "httpx2>=2.16.0",
     "hypothesis>=6.170.5",
     "matplotlib>=3.11.2",
     "pyright>=1.1.414",

@@ -3,6 +3,7 @@
     findex [-v | -vv] index <corpus> --out index.bin [--positions] [--limit N]
     findex [-v | -vv] search <index> "<query>" [-k 10] [--scorer bm25|tfidf] [--json]
     findex [-v | -vv] stats <index> [--top 20]
+    findex [-v | -vv] crawl <seed-url>... [--max-pages 500] [--concurrency 10] [--per-host 2] [--out FILE]
 
 Results go to stdout (``--json`` emits one JSON object per line, for ``jq``);
 progress, logs and errors go to stderr. Expected failures - a missing index, a
@@ -11,6 +12,7 @@ bad query - print one line and exit non-zero instead of a traceback.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -22,6 +24,7 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.live import Live
 from rich.logging import RichHandler
 from rich.progress import Progress, SpinnerColumn, TaskID, TextColumn, TimeElapsedColumn
 from rich.table import Table
@@ -29,6 +32,8 @@ from rich.text import Text
 
 from findex import __version__
 from findex.corpus import Document, iter_documents
+from findex.crawler.crawl import CrawlStats, url_log
+from findex.crawler.crawl import crawl as crawl_pages
 from findex.index import Index, build_index
 from findex.parallel import DEFAULT_WORKERS, build_parallel, default_executor
 from findex.query import QueryError
@@ -238,3 +243,95 @@ def stats(
         for rank, term in enumerate(sorted(idx, key=idx.cf, reverse=True)[:top], start=1):
             terms.add_row(str(rank), term, f"{idx.cf(term):,}", f"{idx.df(term):,}")
         out.print(terms)
+
+
+@app.command()
+def crawl(
+    seeds: Annotated[list[str], typer.Argument(help="Start URL(s).", metavar="SEED...")],
+    out_path: Annotated[
+        Path, typer.Option("--out", "-o", help="JSON-lines output (one page per line).")
+    ] = Path("data/crawl/crawl.jsonl"),
+    max_pages: Annotated[int, typer.Option(min=1, help="Stop after this many pages.")] = 500,
+    concurrency: Annotated[int, typer.Option(min=1, max=200, help="Worker tasks / requests in flight.")] = 10,
+    per_host: Annotated[int, typer.Option(min=1, help="Requests in flight per host.")] = 2,
+    delay: Annotated[float, typer.Option(min=0.0, help="Seconds between request starts, per host.")] = 0.5,
+    scope: Annotated[
+        list[str] | None,
+        typer.Option(help="URL prefix to stay under (repeatable) [default: each seed's dir]."),
+    ] = None,
+    log_path: Annotated[Path, typer.Option("--log", help="Per-URL log: status, bytes, time.")] = Path(
+        "crawl.log"
+    ),
+    debug: Annotated[
+        bool, typer.Option(help="asyncio debug mode: warn about anything blocking the loop.")
+    ] = False,
+) -> None:
+    """Crawl politely (robots.txt, per-host limits, backoff) and stream pages to JSON lines."""
+    stats = CrawlStats()
+    t0 = time.perf_counter()
+    coroutine = _crawl_to_jsonl(
+        seeds, out_path, log_path, stats, max_pages, concurrency, per_host, delay, scope, debug
+    )
+    asyncio.run(coroutine, debug=debug)
+    elapsed = time.perf_counter() - t0
+    err.print(
+        f"crawled {stats.pages:,} pages ({stats.fetched:,} fetched, {stats.errors:,} errors, "
+        f"{stats.skipped_robots:,} disallowed by robots.txt) in {elapsed:.1f} s "
+        f"({stats.pages / elapsed:.1f} pages/s) -> {out_path}; per-URL log: {log_path}",
+        highlight=False,
+    )
+    if not stats.pages:
+        raise _fail("no pages crawled (check the seed URL, the scope and crawl.log)")
+
+
+def _crawl_dashboard(stats: CrawlStats) -> Text:
+    return Text.assemble(
+        ("crawling ", "bold"),
+        f"{stats.pages:,} pages · {stats.pages_per_second:.1f} pages/s · ",
+        f"in flight {stats.in_flight} · queued {stats.queued:,} · ",
+        (f"errors {stats.errors}", "red" if stats.errors else ""),
+        f" · robots-skipped {stats.skipped_robots} · {time.perf_counter() - stats.started:.0f}s",
+    )
+
+
+async def _crawl_to_jsonl(
+    seeds: list[str],
+    out_path: Path,
+    log_path: Path,
+    stats: CrawlStats,
+    max_pages: int,
+    concurrency: int,
+    per_host: int,
+    delay: float,
+    scope: list[str] | None,
+    debug: bool,
+) -> None:
+    if debug:
+        asyncio.get_running_loop().slow_callback_duration = 0.05  # report any step blocking > 50 ms
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(log_path, mode="w", encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    url_log.addHandler(handler)
+    url_log.setLevel(logging.INFO)
+    url_log.propagate = False
+    try:
+        with (
+            out_path.open("w", encoding="utf-8") as f,
+            Live(get_renderable=lambda: _crawl_dashboard(stats), console=err, refresh_per_second=4),
+        ):
+            pages = crawl_pages(
+                seeds,
+                max_pages=max_pages,
+                concurrency=concurrency,
+                per_host=per_host,
+                delay=delay,
+                scopes=scope,
+                stats=stats,
+            )
+            async for page in pages:  # streaming: each page is written as soon as it arrives
+                line = json.dumps(page.to_record(), ensure_ascii=False) + "\n"
+                await asyncio.to_thread(f.write, line)  # file I/O stays off the event loop
+    finally:
+        url_log.removeHandler(handler)
+        handler.close()
+

@@ -13,6 +13,7 @@ and one piece of the engine; every lab is tagged (`lab-01`, `lab-02`, …) so th
 | 3 | The data model, decorators | `Index` object, BM25/TF-IDF, query language, snippets, precision@5 | `lab-03` |
 | 4 | Typing, testing, packaging | `findex` CLI (typer + rich), pyright strict, 77 tests, CI, v0.4.0 wheel | `lab-04` |
 | 5 | Concurrency and the GIL | parallel indexing: serial / threads / processes / free-threaded, benchmarked | `lab-05` |
+| 6 | asyncio | a polite async crawler (robots.txt, per-host limits, retries) that feeds the corpus | `lab-06` |
 
 ## Quick start
 
@@ -38,7 +39,8 @@ The lab-by-lab entry points still work: `uv run python -m findex.stats data/`, `
 |---|---|---|---|
 | Python 3.15 documentation, plain-text build | [docs.python.org/3/download.html](https://docs.python.org/3/download.html) (`python-3.15-docs-text.zip`) | 552 | 16 MB |
 | All PEPs (reStructuredText sources) | [github.com/python/peps](https://github.com/python/peps), `peps/pep-*.rst` (public domain / CC0) | 745 | 15 MB |
-| **Total** | `./scripts/get-corpus.sh` | **1,297** | **31 MB** |
+| Packaging guide, pip, devguide, typing docs (Lab 6) | crawled by `findex crawl` into `data/crawl/python-sites.jsonl` | 267 | 2.5 MB |
+| **Total** | `./scripts/get-corpus.sh` + the crawl command below | **1,564** | **34 MB** |
 
 One file is one document. The corpus lives in `data/`, which is in `.gitignore`: corpora don't go into git,
 the script that fetches them does. Why this corpus: it is the reference I actually search while learning
@@ -640,3 +642,149 @@ program waiting for". Thousands of such waits, with no thread per request, is La
 it. Parallel speedup is bounded by everything that stays sequential — start-up, data transfer, the merge,
 and the largest indivisible task — and I can only see those by measuring them separately. The cheapest
 synchronization is none: design the data so workers never share mutable state.
+
+---
+
+## Lab 6 — The async crawler
+
+**Built:** `findex.crawler` and `findex crawl`, one thread, one event loop:
+
+```text
+seeds -> [frontier: per-host queues] -> N workers (TaskGroup) -> [pages: asyncio.Queue] -> async for page -> JSON lines
+```
+
+- **`fetch`** (`crawler/fetch.py`): `httpx.AsyncClient.get` under `asyncio.timeout(10)`, which covers the
+  whole request including the body; up to 3 retries for timeouts, connection errors, 429 and 5xx, with
+  `min(cap, 0.5 · 2ⁿ) + uniform(0, 1)` backoff; a `Retry-After` header (seconds or HTTP date) replaces the
+  computed delay when it is longer; no retry for other 4xx; a redirect loop is reported, not retried. It
+  never raises for network or HTTP trouble — failures are data in the `FetchResult` (status, bytes,
+  elapsed, attempts, error).
+- **`RobotsCache`** (`crawler/robots.py`): one `robots.txt` request per host even when 20 workers ask at
+  once (the first one creates a task, the others `await asyncio.shield` the same task); 404 → allow all,
+  401/403 or 5xx → disallow all (until we know better); `Crawl-delay` is honoured if it exceeds ours.
+- **`crawl()`** (`crawler/crawl.py`): an async generator. `concurrency` workers in an `asyncio.TaskGroup`;
+  a global semaphore, a per-host semaphore (`--per-host`) and a per-host minimum delay between request
+  starts (`--delay`); URL canonicalization (case, default port, fragment, `./` and `../`, `index.html`,
+  sorted query) and a `seen` set, so nothing is fetched twice (the redirect *target* is added too); a scope
+  allowlist (URL prefixes: by default each seed's directory, so no foreign hosts, no other versions or
+  translations); `selectolax` (lexbor) extracts title, main text and links **in a thread**
+  (`asyncio.to_thread`); a clean stop at `--max-pages` (`Queue.shutdown`-style close of the frontier, then
+  the busy workers are cancelled at their current `await`). The generator never `yield`s inside the task
+  group — the group runs in its own task and hands pages over through a queue. Yielding from inside a task
+  group or a timeout scope lets the consumer's cancellation land in the wrong task: that is PEP 789, which
+  happens to be in this corpus.
+- **`findex crawl`** streams one JSON line per page as it arrives (the write goes through
+  `asyncio.to_thread` too), shows a `rich` live line (pages, pages/s, in flight, queued, errors), writes a
+  per-URL `crawl.log` (status, bytes, time, attempts, final URL) and has `--debug` (asyncio debug mode,
+  warn on any step blocking the loop > 50 ms). Indexing stays outside: `findex index data/` reads the JSON
+  lines like any other corpus file.
+
+**Ethics.** I crawled only documentation sites whose `robots.txt` allows everything —
+packaging.python.org, pip.pypa.io, devguide.python.org and typing.python.org — all hosted on Read the
+Docs, whose [crawler policy](https://docs.readthedocs.com/platform/stable/automated-access.html) asks for
+fewer than 4 requests per second and a user agent with a contact: mine is `findex-crawler/0.6 (student
+search-engine project; +https://github.com/batpepe/findex)`, at most 2 requests in flight per host, and
+request starts 1.2 s apart per host — 4 hosts × 1/1.2 s = **3.3 requests/s in total**. The pages are
+copyrighted by their projects: they are indexed for search, not redistributed (`data/` is not in git), and
+the web UI links back to the source.
+
+```text
+$ findex crawl https://packaging.python.org/en/latest/ https://devguide.python.org/ \
+    https://typing.python.org/en/latest/ https://pip.pypa.io/en/stable/ \
+    --max-pages 500 --concurrency 10 --per-host 2 --delay 1.2 --out data/crawl/python-sites.jsonl --debug
+crawled 267 pages (269 fetched, 2 errors, 0 disallowed by robots.txt) in 268.9 s (1.0 pages/s)
+-> data/crawl/python-sites.jsonl; per-URL log: crawl.log
+```
+
+The four sites have 267 reachable pages in scope (85 + 82 + 60 + 40); the crawl stopped on its own when the
+frontier was empty. Median fetch 175 ms, p95 335 ms; 9 redirects followed (missing trailing slashes); 2
+404s, not retried. `--debug` reported **no step that blocked the loop for 50 ms**.
+
+### The benchmark — and the bug it found
+
+Same seeds, `--max-pages 200`, concurrency 1 / 5 / 20, each run in a fresh process
+(`uv run python scripts/bench_crawl.py real`). First version — one FIFO `asyncio.Queue` as the frontier:
+
+| Concurrency | Pages | Wall (s) | Pages/s | Errors | Peak RSS |
+|---|---|---|---|---|---|
+| 1 | 200 | 232.3 | 0.9 | 0 | 58 MiB |
+| 5 | 200 | 223.7 | 0.9 | 0 | 61 MiB |
+| 20 | 200 | 173.5 | 1.2 | 0 | 66 MiB |
+
+Five times the concurrency, the same speed. The cause was **head-of-line blocking**: links are discovered in
+bursts — one page of the packaging guide yields 80 links to the same host — so the FIFO frontier handed
+every worker a URL of *that* host, and they all queued behind its 1.2 s politeness delay while the other
+three hosts sat idle. More workers only helped by luck (some held a URL of another host).
+
+The fix is the classic crawler design (Mercator's "back queues"): **`HostFrontier`**, one FIFO per host plus
+a heap of `(time this host may be contacted again, host)`. `get()` hands out a URL from whichever host is
+ready first, and pushes that host's next turn `delay` seconds ahead. It keeps the `asyncio.Queue` interface
+(`put_nowait`, `get`, `task_done`, `join`, `shutdown`), so the workers didn't change. A unit test feeds it
+`a/1, a/2, a/3, b/1` and checks that `b/1` comes second, not fourth. Same benchmark, after:
+
+| Concurrency | Pages | Wall (s) | Pages/s | Errors | Peak RSS |
+|---|---|---|---|---|---|
+| 1 | 200 | 64.1 | 3.1 | 0 | 74 MiB |
+| 5 | 200 | 63.8 | 3.1 | 0 | 77 MiB |
+| 20 | 200 | 63.8 | 3.1 | 0 | 78 MiB |
+
+**2.7–3.6× faster, and now flat — on purpose.** 3.1 pages/s is the politeness ceiling: 4
+hosts × one request start per 1.2 s = 3.3 requests/s. A single worker already reaches it, because a fetch
+takes 175 ms and the next host is always ready; 20 workers can't go faster without breaking the per-host
+limit. **That is what the per-host limits cost:** throughput is set by `hosts / delay`, not by concurrency.
+I kept them because the alternative is a denial-of-service attack on volunteers' documentation hosting,
+and a ban for my IP.
+
+**What concurrency buys when the server allows it.** Against a local mirror of the HTML docs
+(`scripts/get-mirror.sh` + `scripts/mirror_server.py`: docs.python.org's HTML archive, served with 150 ms of
+simulated network latency, my server so no per-host limit), `--max-pages 300`:
+
+| Concurrency | Pages | Wall (s) | Pages/s | Errors | Peak RSS |
+|---|---|---|---|---|---|
+| 1 (effectively sequential) | 300 | 51.5 | 5.8 | 1 | 162 MiB |
+| 5 | 300 | 11.4 | 26.2 | 1 | 170 MiB |
+| 20 | 300 | 3.8 | **78.9** | 0 | 86 MiB |
+
+**13.6× with 20 coroutines, in one thread.** Each fetch spends ~150 ms waiting and well under 1 ms of CPU, so
+one event loop overlaps 20 waits. Lab 5's indexer was the opposite workload — all CPU, no waiting — where
+one thread can't overlap anything and threads only take turns on the GIL. Async wins when the program is
+waiting; it does nothing for computing. (A thread per request would also have scaled here, but each thread
+costs a stack and an OS scheduling slot; a coroutine costs a few KB, and there are no locks to get wrong
+between `await`s.)
+
+### Not blocking the loop
+
+HTML parsing is CPU work: `extract()` takes **0.9 ms median, 7 ms p95 and 219 ms max** on the 595 pages of
+the mirror (the largest index pages), and tokenizing a page's text 0.4 ms median / 101 ms max. As a
+control I ran the concurrency-20 mirror crawl with `extract()` called directly in the coroutine: asyncio's
+debug mode reported **2 steps blocking the loop for more than 50 ms** — during each, all 20 in-flight
+requests stalled. With `asyncio.to_thread`: **0**. Had I indexed inline, the worst page would have frozen
+the loop for ~100 ms more, every time: that is why the crawler only writes JSON lines and `findex index` runs
+afterwards, in its own process pool (Lab 5).
+
+### A failure, handled
+
+Against the mirror started with `--fail-rate 0.05` (5% of first requests answer `503 Retry-After: 1`) and a
+burst of 10 workers, two kinds of transient failure appeared — the 503s I injected and, unplanned,
+connection refusals when the test server's listen backlog of 5 overflowed. `-v` shows the
+retries, `crawl.log` that every one of them ended in a 200 (`attempts` is the column before the URL):
+
+```text
+INFO findex.crawler.fetch: retry 1/3 for http://127.0.0.1:8768/library/ in 0.8s (ConnectError: All connection attempts failed)
+INFO findex.crawler.fetch: retry 1/3 for http://127.0.0.1:8768/howto/ in 0.6s (ConnectError: All connection attempts failed)
+INFO findex.crawler.fetch: retry 1/3 for http://127.0.0.1:8768/download.html in 1.0s (HTTP 503)
+
+2026-10-22 07:51:44,326 200    73961    904ms 2 http://127.0.0.1:8768/library/
+2026-10-22 07:51:44,579 200    11404   1159ms 2 http://127.0.0.1:8768/download.html
+2026-10-22 07:51:45,486 200    19322   2064ms 3 http://127.0.0.1:8768/howto/
+```
+
+32 URLs needed a retry, none was lost. `download.html` waited exactly the server's `Retry-After: 1`
+(longer than the ~0.5–1.5 s backoff); `/howto/` needed three attempts. On the real sites the only failures
+were two 404s — dead links — which were logged and, correctly, not retried.
+
+**What I learned.** `await` is where a coroutine lets others run, so everything between two `await`s is
+atomic — I never needed a lock — and anything slow between two `await`s freezes every other task. Structured
+concurrency (TaskGroup, cancellation, shutdown) made "stop at 500 pages" a few lines. And the scheduling
+policy matters more than the concurrency level: the same 20 workers went from 1.2 to 3.1 pages/s by changing
+which URL they were given, not how many there were.
