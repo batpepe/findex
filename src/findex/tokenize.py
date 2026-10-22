@@ -52,3 +52,25 @@ def tokenize(text: str) -> Iterator[str]:
             token = token[:-2]
         if token.strip("_"):
             yield token
+
+
+def display_text(text: str) -> str:
+    """NFC + unified apostrophes but *not* case-folded: the text to cut snippets from.
+
+    Both steps keep one character per character, so offsets found in this string
+    can be shown to the user, which is not true after ``casefold`` (``ß`` -> ``ss``).
+    """
+    text = unicodedata.normalize("NFC", text)
+    return text if text.isascii() else text.translate(_APOSTROPHES)
+
+
+def token_spans(shown: str) -> Iterator[tuple[str, int, int]]:
+    """``(token, start, end)`` for a ``display_text`` string; same tokens as ``tokenize``."""
+    for match in WORD_RE.finditer(shown):
+        token = match.group().casefold()
+        if not token.isascii():
+            token = unicodedata.normalize("NFC", token)
+        if token.endswith("'s"):
+            token = token[:-2]
+        if token.strip("_"):
+            yield token, match.start(), match.end()

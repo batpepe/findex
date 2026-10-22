@@ -107,6 +107,7 @@ def _read_jsonl(path: Path, rel_path: str) -> Iterator[tuple[str, str, str]]:
 _FIRST_LINE = re.compile(r"^[ \t]*(?:#+[ \t]+)?(\S.*?)[ \t]*$", re.MULTILINE)
 _PEP_FIELD = re.compile(r"^(PEP|Title):[ \t]*(.+?)[ \t]*$", re.MULTILINE)
 _RST_MARKUP = re.compile(r"``|\\ ")  # ``literal`` quotes and "\ " escapes in PEP titles
+_QUOTED_NAME = re.compile(r'"([\w.]+)"')  # the text docs build quotes module names: "venv"
 
 
 def extract_title(text: str, fallback: str) -> str:
@@ -118,4 +119,6 @@ def extract_title(text: str, fallback: str) -> str:
             title = _RST_MARKUP.sub("", fields["Title"])
             return f"PEP {fields['PEP']} \N{EN DASH} {title}"
     match = _FIRST_LINE.search(head)
-    return match.group(1) if match else fallback
+    if not match:
+        return fallback
+    return _QUOTED_NAME.sub(r"\1", match.group(1)).replace(" --- ", " \N{EM DASH} ")

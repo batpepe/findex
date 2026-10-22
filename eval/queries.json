@@ -1,0 +1,116 @@
+{
+  "about": "Hand-labelled relevance for precision@5. A document is relevant when it is primarily ABOUT the query's topic; passing mentions do not count, and the changelog and the table of contents are never relevant. Labels were made by pooling the top 10 of TF-IDF and BM25 (Lab 3) and adding documents I knew were missing from the pool.",
+  "queries": [
+    {
+      "query": "global interpreter lock",
+      "relevant": [
+        "peps/pep-0684.rst",
+        "peps/pep-0703.rst",
+        "peps/pep-0311.rst",
+        "pydocs/howto/free-threading-python.txt",
+        "pydocs/howto/free-threading-extensions.txt",
+        "pydocs/c-api/threads.txt",
+        "pydocs/faq/library.txt"
+      ]
+    },
+    {
+      "query": "structural pattern matching",
+      "relevant": [
+        "peps/pep-0622.rst",
+        "peps/pep-0634.rst",
+        "peps/pep-0635.rst",
+        "peps/pep-0636.rst",
+        "peps/pep-0642.rst",
+        "pydocs/whatsnew/3.10.txt",
+        "pydocs/reference/compound_stmts.txt"
+      ]
+    },
+    {
+      "query": "generic type hints",
+      "relevant": [
+        "peps/pep-0484.rst",
+        "peps/pep-0483.rst",
+        "peps/pep-0482.rst",
+        "peps/pep-0560.rst",
+        "peps/pep-0585.rst",
+        "peps/pep-0695.rst",
+        "peps/pep-0526.rst",
+        "peps/pep-0563.rst",
+        "peps/pep-0604.rst",
+        "pydocs/library/typing.txt"
+      ]
+    },
+    {
+      "query": "virtual environment",
+      "relevant": [
+        "pydocs/library/venv.txt",
+        "pydocs/tutorial/venv.txt",
+        "peps/pep-0405.rst",
+        "peps/pep-0704.rst",
+        "peps/pep-0832.rst",
+        "peps/pep-0838.rst",
+        "peps/pep-0668.rst"
+      ]
+    },
+    {
+      "query": "f-string formatting",
+      "relevant": [
+        "peps/pep-0498.rst",
+        "peps/pep-0701.rst",
+        "pydocs/reference/lexical_analysis.txt",
+        "pydocs/tutorial/inputoutput.txt"
+      ]
+    },
+    {
+      "query": "async generator",
+      "relevant": [
+        "peps/pep-0525.rst",
+        "peps/pep-0828.rst",
+        "peps/pep-0789.rst",
+        "peps/pep-0533.rst"
+      ]
+    },
+    {
+      "query": "dataclass frozen slots",
+      "relevant": [
+        "pydocs/library/dataclasses.txt",
+        "peps/pep-0557.rst",
+        "peps/pep-0681.rst"
+      ]
+    },
+    {
+      "query": "context manager with statement",
+      "relevant": [
+        "pydocs/library/contextlib.txt",
+        "peps/pep-0343.rst",
+        "peps/pep-0377.rst",
+        "peps/pep-0806.rst",
+        "pydocs/reference/compound_stmts.txt",
+        "pydocs/reference/datamodel.txt"
+      ]
+    },
+    {
+      "query": "unicode normalization",
+      "relevant": [
+        "pydocs/library/unicodedata.txt",
+        "pydocs/howto/unicode.txt",
+        "peps/pep-3131.rst",
+        "peps/pep-0672.rst",
+        "pydocs/reference/lexical_analysis.txt"
+      ]
+    },
+    {
+      "query": "reference counting garbage collection",
+      "relevant": [
+        "pydocs/library/gc.txt",
+        "pydocs/c-api/refcounting.txt",
+        "pydocs/extending/extending.txt",
+        "peps/pep-0442.rst",
+        "peps/pep-0556.rst",
+        "peps/pep-0683.rst",
+        "peps/pep-0703.rst",
+        "peps/pep-0848.rst"
+      ]
+    }
+  ]
+}

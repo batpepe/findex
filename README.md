@@ -8,6 +8,7 @@ and one piece of the engine; every lab is tagged (`lab-01`, `lab-02`, …) so th
 |---|---|---|---|
 | 1 | Iterators & generators | streaming corpus, tokenizer, stats in constant memory | `lab-01` |
 | 2 | Dicts, hashing, memory | inverted index, Boolean search, two on-disk formats | `lab-02` |
+| 3 | The data model, decorators | `Index` object, BM25/TF-IDF, query language, snippets, precision@5 | `lab-03` |
 
 ## Quick start
 
@@ -16,8 +17,8 @@ git clone https://github.com/batpepe/findex && cd findex
 uv sync                                   # Python 3.14 + dev tools from uv.lock
 ./scripts/get-corpus.sh                   # ~31 MB into data/ (git-ignored)
 uv run python -m findex.stats data/       # corpus statistics, lazily
-uv run python -m findex.index data/ --out index.bin          # build + save the inverted index
-uv run python -m findex.search index.bin "asyncio TaskGroup" # Boolean search
+uv run python -m findex.index data/ --out index.bin --positions   # build + save the inverted index
+uv run python -m findex.search index.bin '"event loop" NOT asyncio' # ranked search with snippets
 ```
 
 ## The corpus
@@ -254,3 +255,126 @@ arrays and why Lab 8 turns them into NumPy.
 pointer to it and the GC links are paid per instance, and at 861,841 instances they dominate. `slots`
 fixes the dict, arrays fix the objects. And the hashing contract is what makes `frozen=True` the safe
 way to get value objects that can live in sets and as keys.
+
+---
+
+## Lab 3 — Ranking and the object model
+
+**Built:**
+
+- **`Index`** (`findex.index`) is a read-only `collections.abc.Mapping[str, list[Posting]]`: implementing
+  `__getitem__`, `__iter__` and `__len__` gives `in`, `.get`, `.keys/.items`, `==` for free, and
+  `__contains__` is overridden only because a direct dict lookup beats `Mapping`'s try/except.
+  `repr(index)` is `Index(terms=78_218, docs=1_297, positions=True)`; `num_docs` is a property,
+  `avg_doc_length` a `cached_property` (BM25 needs it for every posting: computed once per index, not once
+  per posting); `df()`, `doc_length()`, `title()`, `text()`. `with open_index(path) as ix:` (a
+  `@contextmanager`) releases the memory map even when the body raises — a test raises inside it and
+  checks the map is gone. The binary index now also stores every document's text, zlib-compressed (31 MB
+  of text → 9.4 MB), so snippets need no corpus on disk.
+- **Scoring** (`findex.rank`): a `Scorer` `typing.Protocol` (`score(term, posting, index) -> float`) and
+  two independent implementations, `TfIdf` and `BM25(k1=1.5, b=0.75)` — frozen dataclasses with
+  `__call__`, so they are hashable (they are part of the cache key) and usable as functions. No base class.
+  `Searcher.search(query, scorer, k)` accumulates per-document scores in a `defaultdict(float)` and keeps
+  the top `k` with `heapq.nlargest` — O(n log k) instead of sorting every match. Results are
+  `SearchResult` dataclasses with `order=True` whose first field is `score`, so `sorted(results)` ranks
+  them; `ResultList` is a `Sequence` whose slices stay `ResultList`s and keep `total`.
+- **The query language** (`findex.query`): a recursive-descent parser (`or_expr → and_expr → not_expr →
+  atom`) building `Term`, `Phrase`, `And`, `Or`, `Not` nodes — frozen dataclasses, so tests compare
+  **trees**: `parse("a OR b c") == Or(Term("a"), And(Term("b"), Term("c")))`. Nodes overload `&`, `|`,
+  `~` (`Term("a") & ~Term("b")`), and each has `evaluate(index) -> frozenset[int]`. Phrases are checked
+  with Lab 2's two-pointer `intersect` on positions shifted by their offset in the phrase; a hyphenated
+  word (`free-threaded`) becomes a phrase automatically — the tokenizer split it, positions glue it back.
+  Bad syntax raises `QueryError` with the offset (`missing ')' for '(' at offset 0`).
+- **Decorators and caching:** `@timed` (with `functools.wraps`) logs `build_index`, `load` and
+  `Searcher.search` at DEBUG; the query → ranked-ids step and the snippets are `functools.lru_cache`d
+  *per `Searcher` instance* (a cache on the method itself would be shared by every instance and keep
+  every index alive). `explain()` is a `functools.singledispatch` function with one implementation per
+  node type, and `--explain` prints each result's score term by term, like Elasticsearch's `_explain`.
+- **Snippets** (`findex.snippets`): re-tokenize the stored text with offsets (`token_spans`, the same
+  tokens as `tokenize`, but on text that is NFC-normalized and *not* case-folded, so offsets stay valid
+  for display), slide a ±80-character window over the hits and keep the one covering the most distinct
+  query terms, then highlight (`**term**` in the terminal, `<mark>` for HTML later).
+
+```text
+$ uv run python -m findex.search index.bin '"event loop" NOT asyncio' -k 3 --explain
+9 matching documents for '"event loop" NOT asyncio' (bm25, top 3)
+parsed as: ("event loop" AND NOT asyncio)
+  1.   6.500  Tkinter dialogs  (pydocs/library/dialog.txt)
+         … Render dialog and start **event** **loop**. ok_event(**event**) Exit dialog returning current selection.  …
+           event            tf=17    df=216   ->  4.262
+           loop             tf=1     df=245   ->  2.238
+           doc length 1,380 tokens (average 3,202)
+  2.   6.127  tkinter — Python interface to Tcl/Tk  (pydocs/library/tkinter.txt)
+         … like "grid" controls where in the user interface they are placed. **event** **loop** Tkinter reacts to user input, …
+           event            tf=82    df=216   ->  3.899
+           loop             tf=14    df=245   ->  2.228
+           doc length 33,536 tokens (average 3,202)
+  ...
+```
+
+The cache hit, from the timing log (`--repeat 2 -v`):
+
+```text
+DEBUG findex.rank: ranked 'unicode normalization': 17 matches, top 2
+DEBUG findex.rank: query cache: CacheInfo(hits=0, misses=1, maxsize=256, currsize=1)
+DEBUG findex.rank: Searcher.search took 8.27 ms
+DEBUG findex.rank: query cache: CacheInfo(hits=1, misses=1, maxsize=256, currsize=1)
+DEBUG findex.rank: Searcher.search took 0.06 ms
+```
+
+### The three sanity checks, on this corpus
+
+`uv run python scripts/sanity_ranking.py index.bin` (all three are also unit tests in `tests/test_rank.py`):
+
+1. **A rare term outranks a common one.** `python OR walrus`: `python` is in 1,207 of 1,297 documents,
+   `walrus` in 16. All four top results contain `walrus` (PEP 622, 3136, 635, 634); IDF makes `python`
+   almost worthless.
+2. **BM25 saturates term frequency.** The BM25 contribution of `walrus` in an average-length document:
+
+   | tf | 1 | 2 | 3 | 5 | 10 | 19 | 20 | 21 |
+   |---|---|---|---|---|---|---|---|---|
+   | BM25 | 4.366 | 6.237 | 7.276 | 8.395 | 9.490 | 10.115 | 10.152 | 10.186 |
+   | TF-IDF | 4.395 | 7.442 | 9.224 | 11.469 | 14.516 | 17.337 | 17.562 | 17.777 |
+
+   The 2nd occurrence adds +1.87; the 21st adds +0.034 — 55× less, bounded by `idf · (k1 + 1)`. TF-IDF's
+   `1 + ln tf` grows forever (+0.21 for the 21st).
+3. **A short document with one match beats a long one with one match.** The term `mmdf` occurs exactly
+   once in *Internet Data Handling* (228 tokens) and once in the *Changelog* (342,806 tokens): BM25 gives
+   **9.732 vs 0.116**; TF-IDF gives both **5.782** — it cannot tell them apart.
+
+### Evaluation: precision@5
+
+Ten queries I know the answers to, with relevance labelled by hand in `eval/queries.json` (relevant =
+the document is primarily *about* the topic; the changelog and the table of contents are never relevant;
+I pooled the top 10 of both scorers and added known documents missing from the pool).
+`uv run python scripts/evaluate.py index.bin`:
+
+| Query | relevant | BM25 P@5 | TF-IDF P@5 |
+|---|---|---|---|
+| `global interpreter lock` | 7 | 0.6 | 0.4 |
+| `structural pattern matching` | 7 | 1.0 | 1.0 |
+| `generic type hints` | 10 | 0.8 | 0.4 |
+| `virtual environment` | 7 | 1.0 | 0.8 |
+| `f-string formatting` | 4 | 0.2 | 0.2 |
+| `async generator` | 4 | 0.6 | 0.4 |
+| `dataclass frozen slots` | 3 | 0.4 | 0.4 |
+| `context manager with statement` | 6 | 0.8 | 0.6 |
+| `unicode normalization` | 5 | 0.8 | 0.6 |
+| `reference counting garbage collection` | 8 | 1.0 | 0.8 |
+| **mean** | | **0.72** | **0.56** |
+
+BM25 wins or ties on every query. The main TF-IDF failure is visible in the pools: the 342,806-token
+changelog is TF-IDF's **#1 result for 7 of the 10 queries** — it mentions everything, and nothing in
+TF-IDF penalizes length. The worst query for both is `f-string formatting`: the tokenizer splits
+`f-string` into `f` + `string` and the query becomes the phrase `"f string"`, but the documents mostly
+say `f-strings` — and without stemming `strings` ≠ `string`. PEP 701 (*Syntactic formalization of
+f-strings*) is not in BM25's top 5. That is a tokenizer limitation, not a ranking one; Lab 8's semantic
+search is the other fix. `dataclass frozen slots` stops at 0.4 for a similar reason: implicit AND drops
+PEP 557 (*Data Classes*), which only ever writes `__slots__` — and Lab 1's rule 6 keeps identifiers whole,
+so the token is `__slots__`, never `slots`. Every tokenizer rule is a trade-off that shows up in ranking.
+
+**What I learned.** `len()`, `in`, `[]`, `with`, `sorted()` are protocols, and implementing three
+methods of `Mapping` bought a dozen behaviors. Decorators are just `f = timed(f)`; `wraps` keeps the
+identity of what they wrap; `lru_cache` needs hashable arguments, which is one more reason the scorers
+are frozen dataclasses. And measuring ranking — even with ten queries — showed a problem (length
+normalization) that no unit test would have.

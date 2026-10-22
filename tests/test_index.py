@@ -1,4 +1,4 @@
-"""Inverted index, Boolean merges and persistence (Lab 2)."""
+"""Inverted index, Boolean merges and persistence (Lab 2), Index data model (Lab 3)."""
 
 import random
 from pathlib import Path
@@ -6,8 +6,9 @@ from pathlib import Path
 import pytest
 
 from findex.corpus import Document
-from findex.index import DocMeta, InvertedIndex, Posting, build_index
-from findex.search import SET_OPS, boolean_search, difference, intersect, union
+from findex.index import DocMeta, Index, Posting, build_index, open_index
+from findex.merge import SET_OPS, difference, intersect, union
+from findex.search import boolean_search
 from findex.store import MappedPostings, load, save
 
 DOCS = [
@@ -18,7 +19,7 @@ DOCS = [
 
 
 @pytest.fixture
-def index() -> InvertedIndex:
+def index() -> Index:
     return build_index(DOCS, positions=True)
 
 
@@ -30,14 +31,29 @@ def test_posting_and_docmeta_are_hashable_value_objects() -> None:
     assert not hasattr(Posting(1, 2), "__dict__")  # slots: no per-instance dict
 
 
-def test_build_postings_sorted_with_tf_and_positions(index: InvertedIndex) -> None:
-    assert index.postings["the"] == [Posting(0, 2, (0, 4)), Posting(1, 1, (0,))]
-    assert index.postings["cat"] == [Posting(0, 1, (1,)), Posting(2, 1, (1,))]
+def test_build_postings_sorted_with_tf_and_positions(index: Index) -> None:
+    assert index["the"] == [Posting(0, 2, (0, 4)), Posting(1, 1, (0,))]
+    assert index["cat"] == [Posting(0, 1, (1,)), Posting(2, 1, (1,))]
     assert index.doc_lengths == {0: 6, 1: 3, 2: 5}
     assert index.doc_meta[2] == DocMeta("c.txt", "C")
-    for plist in index.postings.values():
+    for plist in index.values():
         ids = [p.doc_id for p in plist]
         assert ids == sorted(ids)
+
+
+def test_index_speaks_the_data_model(index: Index) -> None:
+    assert len(index) == 8  # distinct terms
+    assert "cat" in index
+    assert "unicorn" not in index
+    with pytest.raises(KeyError):
+        index["unicorn"]
+    assert sorted(index) == ["a", "and", "cat", "dog", "mat", "on", "sat", "the"]
+    assert repr(index) == "Index(terms=8, docs=3, positions=True)"
+    assert index.num_docs == 3
+    assert index.avg_doc_length == pytest.approx(14 / 3)
+    assert index.df("the") == 2
+    assert index.df("unicorn") == 0
+    assert index.text(1) == "the dog sat"
 
 
 def test_merges_agree_with_python_sets() -> None:
@@ -51,7 +67,7 @@ def test_merges_agree_with_python_sets() -> None:
 
 
 @pytest.mark.parametrize("engine", ["merge", "set"])
-def test_boolean_queries(index: InvertedIndex, engine: str) -> None:
+def test_boolean_queries(index: Index, engine: str) -> None:
     assert boolean_search(index, "cat", engine) == [0, 2]
     assert boolean_search(index, "cat dog", engine) == [2]
     assert boolean_search(index, "cat OR dog", engine) == [0, 1, 2]
@@ -62,24 +78,31 @@ def test_boolean_queries(index: InvertedIndex, engine: str) -> None:
 
 
 @pytest.mark.parametrize("fmt", ["binary", "pickle"])
-def test_save_load_round_trip(index: InvertedIndex, tmp_path: Path, fmt: str) -> None:
+def test_save_load_round_trip(index: Index, tmp_path: Path, fmt: str) -> None:
     path = tmp_path / f"index.{fmt}"
     save(index, path, fmt)
-    loaded = load(path)
-    assert dict(loaded.postings) == dict(index.postings)
-    assert loaded.doc_lengths == index.doc_lengths
-    assert loaded.doc_meta == index.doc_meta
-    assert loaded.has_positions
-    if fmt == "binary":
-        assert isinstance(loaded.postings, MappedPostings)
-        assert "cat" in loaded.postings
-        assert "unicorn" not in loaded.postings
-        with pytest.raises(KeyError):
-            loaded.postings["unicorn"]
-        loaded.postings.close()
+    with open_index(path) as loaded:
+        assert dict(loaded) == dict(index)
+        assert loaded.doc_lengths == index.doc_lengths
+        assert loaded.doc_meta == index.doc_meta
+        assert loaded.has_positions
+        assert [loaded.text(d) for d in range(3)] == [d.text for d in DOCS]
+        if fmt == "binary":
+            assert isinstance(loaded.postings, MappedPostings)
+            assert "unicorn" not in loaded
+            with pytest.raises(KeyError):
+                loaded["unicorn"]
 
 
-def test_binary_format_is_deterministic(index: InvertedIndex, tmp_path: Path) -> None:
+def test_open_index_closes_even_when_the_body_raises(index: Index, tmp_path: Path) -> None:
+    save(index, tmp_path / "i.bin")
+    with pytest.raises(RuntimeError), open_index(tmp_path / "i.bin") as loaded:
+        raise RuntimeError("boom")
+    with pytest.raises(ValueError):  # the memory map is gone: reading it now fails loudly
+        loaded["cat"]
+
+
+def test_binary_format_is_deterministic(index: Index, tmp_path: Path) -> None:
     save(index, tmp_path / "1.bin")
     save(load(tmp_path / "1.bin"), tmp_path / "2.bin")
     assert (tmp_path / "1.bin").read_bytes() == (tmp_path / "2.bin").read_bytes()
