@@ -12,9 +12,9 @@ deployed by ArgoCD ([Lab 7](#deployed-findexbatpepeonline)).
 
 ![findex search in a terminal: ranked results with highlighted snippets](docs/demo.gif)
 
-| The corpus | A new 3-term query, snippets included | Ranking the most common word | Questions in other words (precision@5) |
+| The corpus | The live site under load (p95) | Ranking the most common word | Questions in other words (precision@5) |
 |---|---|---|---|
-| 1,297 documents, 34 MB, 4.15 M tokens | **7.5 ms** (31 ms before Lab 8) | **156×** faster with NumPy | **0.40** by meaning, 0.04 by keywords |
+| 1,297 documents, 34 MB, 4.15 M tokens | **290 ms** at 87 requests/s, 20 clients through Cloudflare | **156×** faster with NumPy | **0.40** by meaning, 0.04 by keywords |
 
 It grew over the eight labs of the *Python - Build a Search Engine* course, one language feature and one
 piece of the engine per lab; every lab is tagged (`lab-01` ... `lab-08`), so the history shows it growing.
@@ -84,6 +84,7 @@ Every number below comes from a script in `scripts/` (named in each lab's sectio
 | 5 | `counter[k] += 1` from 4 threads on 3.14t | lost 44,098 of 4,152,788 increments |
 | 6 | Crawler with per-host back queues instead of one FIFO | 1.2 -> 3.1 pages/s (the politeness ceiling) |
 | 7 | `/search` load test: 1 worker vs 4 workers | 46 vs 150 requests/s, p50 1,058 vs 306 ms |
+| 7 | `/search` on the live site, 20 clients through Cloudflare (cached path) | 87 requests/s, p50 175 ms, p95 290 ms |
 | 8 | Ranking: Lab 3 Python loop vs NumPy | 34× (`python`), 156× (`the`), 0.8× (`walrus`, 16 postings) |
 | 8 | A new query end to end, snippets included | 4.2× faster (`global interpreter lock`: 31.2 -> 7.5 ms) |
 | 8 | Semantic search: all 32,367 passage similarities + best passage per document | 1.9 ms (brute force, exact) |
