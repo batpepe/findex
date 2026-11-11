@@ -918,12 +918,7 @@ new connection per request, so with several worker processes an idle one accepts
 | local, 1 worker, `def` | `/search` | 50 | 46 | 1058 | 1680 | 1717 |
 | local, 4 workers, `def` | `/search` | 50 | **150** | **306** | 629 | 976 |
 | local, 1 worker, `def`, 3.14t (no GIL) | `/search` | 50 | 76 | 558 | 1624 | 2956 |
-| deployed: findex.batpepe.online, 1 pod (1 CPU), through Cloudflare | `/search` | 20 | _pending_ | | | |
-
-<!-- the deployed row: after the rollout, from the Mac:
-     oha -z 15s -c 20 --disable-keepalive 'https://findex.batpepe.online/search?q=global+interpreter+lock'
-     (the query cache is on in production: vary q, or read the result as "cached path") -->
-
+| deployed: findex.batpepe.online, 1 pod (1 CPU), through Cloudflare, cached path | `/search` | 20 | 87 | 175 | 290 | 1190 |
 
 - **1 worker: ~46 RPS either way** — one GIL, one core's worth of Python; 50 clients just queue, so p50 ≈ 50
   × 21 ms ≈ 1 s. The `async def` row has the slightly worse tail: the loop serves the queued requests strictly
@@ -935,6 +930,12 @@ new connection per request, so with several worker processes an idle one accepts
 - I first ran oha with keep-alive and got 93 RPS for 4 workers in one run and 52 in the next: with 50
   long-lived connections, whichever worker accepted most of them did most of the work. Measuring a server
   is measuring its connection handling too.
+- **Deployed: 87 RPS at a 175 ms median, through Cloudflare** — one 15 s run from my Mac:
+  `oha -z 15s -c 20 --disable-keepalive 'https://findex.batpepe.online/search?q=global+interpreter+lock'`.
+  One query with the production query cache on, so this is the cached path, not ranking. With keep-alive off
+  every request is a new TCP + TLS handshake with the Cloudflare edge: dial-up averaged 145 ms of the 229 ms
+  mean, and the slowest request spent 2.10 s of its 2.18 s connecting. Most of the latency is the connection,
+  not the pod.
 
 ### What the GIL was hiding, part 2
 
