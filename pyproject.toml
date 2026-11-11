@@ -1,16 +1,16 @@
 [project]
 name = "findex"
-version = "0.7.0"
-description = "A full-text search engine over the Python docs and PEPs, built in 8 labs"
+version = "1.0.0"
+description = "A full-text and semantic search engine over the Python docs and PEPs, built in 8 labs"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [
     { name = "batpepe", email = "oskostya25@gmail.com" }
 ]
-keywords = ["search", "inverted-index", "bm25", "information-retrieval"]
+keywords = ["search", "inverted-index", "bm25", "information-retrieval", "embeddings", "hybrid-search"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "Programming Language :: Python :: 3.14",
     "Topic :: Text Processing :: Indexing",
@@ -21,11 +21,19 @@ dependencies = [
     "fastapi>=0.159.1",
     "httpx>=0.28.1",
     "jinja2>=3.1.6",
+    "numpy>=2.3",
     "pydantic-settings>=2.16.1",
     "rich>=15.0.0",
     "selectolax>=1.0.1",
     "typer>=0.27.3",
     "uvicorn>=0.54.0",
+]
+
+[project.optional-dependencies]
+# semantic + hybrid search (Lab 8): ONNX Runtime runs all-MiniLM-L6-v2 without PyTorch
+semantic = [
+    "onnxruntime>=1.22",
+    "tokenizers>=0.21",
 ]
 
 [project.urls]
@@ -45,6 +53,7 @@ dev = [
     "matplotlib>=3.11.2",
     "pyright>=1.1.414",
     "pytest>=9.1.1",
+    "pytest-benchmark>=5.1",
     "pytest-cov>=7.1.0",
     "ruff>=0.17.1",
 ]
@@ -60,6 +69,7 @@ allowed-confusables = ["σ", "ς", "Σ", "ι", "ʼ", "’", "‘", "＇", "і", 
 
 [tool.pyright]
 include = ["src", "tests", "scripts"]
+exclude = ["tests/data", "scripts/demo_gif.py"]  # PEP 723 scripts with their own dependencies
 typeCheckingMode = "strict"
 pythonVersion = "3.14"
 

@@ -1,14 +1,23 @@
 # findex
 
 [![CI](https://github.com/batpepe/findex/actions/workflows/ci.yml/badge.svg)](https://github.com/batpepe/findex/actions/workflows/ci.yml)
+[![Image](https://github.com/batpepe/findex/actions/workflows/image.yml/badge.svg)](https://github.com/batpepe/findex/actions/workflows/image.yml)
 
-A full-text search engine over the **Python documentation and every PEP**, built from scratch in Python
-over the eight labs of the *Python — Build a Search Engine* course. Each lab adds one language feature
-and one piece of the engine; every lab is tagged (`lab-01`, `lab-02`, …) so the history shows it growing.
+A search engine over the **Python documentation and every PEP**, built from scratch in Python: you can ask
+it `"event loop" NOT asyncio`, or, in your own words, *find out how long a piece of code takes to run*.
 
 **Live: [findex.batpepe.online](https://findex.batpepe.online)** (API browser:
 [/docs](https://findex.batpepe.online/docs)) - self-hosted on my K3s homelab behind a Cloudflare Tunnel,
 deployed by ArgoCD ([Lab 7](#deployed-findexbatpepeonline)).
+
+![findex search in a terminal: ranked results with highlighted snippets](docs/demo.gif)
+
+| The corpus | A new 3-term query, snippets included | Ranking the most common word | Questions in other words (precision@5) |
+|---|---|---|---|
+| 1,297 documents, 34 MB, 4.15 M tokens | **7.5 ms** (31 ms before Lab 8) | **156×** faster with NumPy | **0.40** by meaning, 0.04 by keywords |
+
+It grew over the eight labs of the *Python - Build a Search Engine* course, one language feature and one
+piece of the engine per lab; every lab is tagged (`lab-01` ... `lab-08`), so the history shows it growing.
 
 | Lab | Feature | What it added | Tag |
 |---|---|---|---|
@@ -19,24 +28,69 @@ deployed by ArgoCD ([Lab 7](#deployed-findexbatpepeonline)).
 | 5 | Concurrency and the GIL | parallel indexing: serial / threads / processes / free-threaded, benchmarked | `lab-05` |
 | 6 | asyncio | a polite async crawler (robots.txt, per-host limits, retries) that feeds the corpus | `lab-06` |
 | 7 | FastAPI, Pydantic, Docker | search API + web UI, containerized, load-tested, deployed | `lab-07` |
+| 8 | Profiling, NumPy, embeddings | profiled hot paths, NumPy ranking, semantic + hybrid (RRF) search, v1.0.0 | `lab-08` |
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph corpus [The corpus]
+        F["Python docs + PEPs<br/>get-corpus.sh"]
+        J["crawled pages, JSON lines<br/><i>Lab 6: async crawler</i>"]
+    end
+    F --> T["iter_documents + tokenize<br/><i>Lab 1: generators</i>"]
+    J --> T
+    T -->|"map / reduce<br/><i>Lab 5: processes or no-GIL threads</i>"| I["inverted index, mmap file<br/><i>Lab 2</i>"]
+    I --> K["query parser, BM25 / TF-IDF<br/><i>Lab 3</i>; NumPy engine <i>Lab 8</i>"]
+    I -->|"findex embed: chunks -> MiniLM<br/><i>Lab 8</i>"| V["chunk vectors (.npy, mmap)"]
+    V --> S["E @ q, best chunk per document<br/><i>Lab 8</i>"]
+    K --> H["hybrid: reciprocal rank fusion<br/><i>Lab 8</i>"]
+    S --> H
+    H --> C["findex CLI<br/><i>Lab 4: typer + rich</i>"]
+    H --> W["FastAPI + web UI<br/><i>Lab 7</i>"]
+    W --> D["Docker -> GHCR -> ArgoCD -> K3s<br/>Cloudflare Tunnel <i>Lab 7</i>"]
+```
 
 ## Quick start
 
 ```bash
-# install the command (Python 3.14+); or from a clone: uv tool install .
-uv tool install https://github.com/batpepe/findex/releases/download/v0.4.0/findex-0.4.0-py3-none-any.whl
-
 git clone https://github.com/batpepe/findex && cd findex
+uv tool install '.[semantic]'                # the `findex` command (Python 3.14+); drop [semantic] for keyword only
 ./scripts/get-corpus.sh                      # ~31 MB into data/ (git-ignored)
 findex index data/ --out index.bin           # positions + texts, binary format
 findex search index.bin '"event loop" NOT asyncio'
 findex search index.bin 'TaskGroup' --json | jq .title
-findex stats index.bin
+findex embed index.bin                       # semantic search: downloads all-MiniLM-L6-v2 once; CPU-bound (~20 min on 2 vCPUs)
+findex search index.bin 'find out how long a piece of code takes to run' --mode semantic
+findex serve index.bin                       # the web UI and API on http://127.0.0.1:8000
 ```
 
-Development: `uv sync`, then `uv run pytest`, `uv run ruff check .`, `uv run pyright`.
+Development: `uv sync --extra semantic`, then `uv run pytest`, `uv run ruff check .`, `uv run pyright`.
 The lab-by-lab entry points still work: `uv run python -m findex.stats data/`, `python -m findex.index`,
 `python -m findex.search`.
+
+## The measurements, in one place
+
+Every number below comes from a script in `scripts/` (named in each lab's section).
+
+| Lab | Measured | Result |
+|---|---|---|
+| 1 | Peak memory, full corpus: lists vs generators | 261.6 MiB vs 41.2 MiB (16.6 MiB after the Lab 4 tokenizer fix) |
+| 2 | Index load: pickle vs mmap-ed binary | 2,013 ms vs 25 ms (80×) |
+| 2 | Bytes per posting: dataclass / `slots=True` / arrays | 118 / 78 / 37 |
+| 3 | precision@5 on 10 labelled queries: BM25 vs TF-IDF | 0.72 vs 0.56 |
+| 4 | Tests, coverage | 77 tests, 7 Hypothesis properties, 94% (now 196 tests, 94%) |
+| 5 | Parallel index build: 8 processes / 4 free-threaded threads | 1.81× / 2.29× |
+| 5 | `counter[k] += 1` from 4 threads on 3.14t | lost 44,098 of 4,152,788 increments |
+| 6 | Crawler with per-host back queues instead of one FIFO | 1.2 -> 3.1 pages/s (the politeness ceiling) |
+| 7 | `/search` load test: 1 worker vs 4 workers | 46 vs 150 requests/s, p50 1,058 vs 306 ms |
+| 8 | Ranking: Lab 3 Python loop vs NumPy | 34× (`python`), 156× (`the`), 0.8× (`walrus`, 16 postings) |
+| 8 | A new query end to end, snippets included | 4.2× faster (`global interpreter lock`: 31.2 -> 7.5 ms) |
+| 8 | Semantic search: all 32,367 passage similarities + best passage per document | 1.9 ms (brute force, exact) |
+| 8 | precision@5: keyword / semantic / hybrid, 10 queries and 5 paraphrases | 10: 0.74 / 0.66 / **0.82**; paraphrases: 0.04 / **0.40** / 0.12 |
+
+Labs 1-7 were measured on an Apple M4; Lab 8 on a 2-vCPU cloud VM (see its section), so compare ratios,
+not milliseconds, across that line.
 
 ## The corpus
 
@@ -950,3 +1004,291 @@ free-threaded build exposed a shared-`memoryview` race the GIL had hidden. Deplo
 half: a health endpoint is a contract with the orchestrator (ready vs alive are different questions), and
 "the same image everywhere, configured by the environment" is what made the CI smoke test, my laptop and
 the cluster run identical bytes.
+
+---
+
+## Lab 8 - Fast, then smart
+
+**Built:** a profile-driven speed-up of the hot paths, `findex.vector` (the NumPy engine: Boolean masks,
+vectorized BM25/TF-IDF, `np.argpartition` top-k), a snippet scanner that runs in C, `pytest-benchmark` in CI,
+and `findex.semantic`: chunk embeddings with all-MiniLM-L6-v2, cosine search as one matrix-vector product,
+and hybrid search with reciprocal rank fusion - in the CLI (`--mode`), the API (`?mode=`) and the UI.
+
+**Where these numbers come from.** A cloud VM - Intel Xeon @ 2.1 GHz, 2 vCPUs, 8 GB, Linux, Python 3.14.8,
+NumPy 2.5 with OpenBLAS - on the corpus rebuilt from the same sources: the docs' reStructuredText converted
+to text (docs.python.org was not reachable from that machine) plus all PEPs, 1,301 documents, 4.29 M tokens.
+It is close to the Mac's corpus (`python` is in 1,207 documents on both, `walrus` in 16, BM25's precision@5
+is 0.74 vs 0.72), but milliseconds are not comparable with Labs 1-7; the before/after ratios are. Every
+table says which script reproduces it.
+
+### M1 - Profile first
+
+`findex search index.bin "global interpreter lock"` (one shot) under `python -m cProfile -s cumtime`:
+0.45 s, of which **imports 0.19 s**, loading the index 0.085 s (0.075 s of it parsing the JSON header),
+**snippets 0.134 s**, and ranking - the part I would have optimized first - **6 ms**. The steady state is
+clearer still. `scripts/profile_search.py` runs the same query in a loop with the cache off, under py-spy
+(sampling, no distortion) - [before](docs/flame-search-before.svg), [after](docs/flame-search-after.svg):
+
+| Where a new 3-term query spent its time (py-spy, before) | Share |
+|---|---|
+| `make_snippet` -> `token_spans`: re-tokenizing each result document in full | 61% |
+| `make_snippet` -> `display_text`: NFC + apostrophes over each whole document | 17% |
+| `make_snippet` itself (the token loop, the window) | 11% |
+| ranking: parse, `frozenset`s, `decode_postings`, `BM25.score` per posting | 4% |
+
+Scalene splits each line into Python time and native time, and that split changed my hypothesis. The two
+biggest lines, both in `token_spans`, were *native*: `normalize("NFC", word.casefold())` (34% of CPU, all of it
+in C) and the `yield` with `match.start()/end()` (34%: 21% Python, 13% C). Native, but 2.5 million tiny C calls
+issued by a Python loop, one per token of documents up to 530,390 tokens long, to find ten highlights. Making
+the Python faster would not help; making far fewer calls would. The index build ([before](docs/flame-index-before.svg),
+[after](docs/flame-index-after.svg)) had the same pattern: per-word normalization 16%, `zlib.compress` 15%,
+the per-token `yield`/`append` loop about 25%, `str.translate` 7%.
+
+The hotspots, written down before changing anything, and what happened:
+
+| # | Hotspot | Hypothesis | Change | Outcome |
+|---|---|---|---|---|
+| 1 | Snippets re-tokenize every result document | the work grows with the document, not with the hits; a C-level scan for just the query terms is enough | `hit_spans`: one regex (the terms joined by `\|`) over a case-folded copy, then only the candidates go through the tokenizer's rules | a new 3-term query: 31.2 -> 7.5 ms |
+| 2 | `display_text` used `str.translate` with a dict | translate looks every character up in the dict; the four apostrophes are rare | four `str.replace` calls (a vectorized search each) | 56 ms -> 1.4 ms on the changelog |
+| 3 | Ranking: a `Posting` object and a `score()` call per posting | interpreter overhead per posting, growing with document frequency | the NumPy engine (M2) | `python`: 2.72 -> 0.08 ms |
+| 4 | Tokenizer: `normalize(casefold(w))` for every word of a non-ASCII document | most words in such documents are ASCII, where `lower()` is the same thing | per-word ASCII fast path | serial build 4.67 -> 3.69 s, byte-identical index |
+| 5 | CLI start-up imports the crawler (httpx, asyncio) and `importlib.metadata` | a search never crawls | imports inside the commands, PEP 562 lazy `__version__` | one-shot `findex search`: 337 -> 275 ms |
+| - | `zlib.compress` at level 6: 15% of the build | level 1 is ~3× faster | measured, *kept* level 6 | 0.79 -> 0.27 s, but texts 9.5 -> 11.0 MiB; the build is offline, the file ships in the image and sits in the page cache |
+| - | JSON header parse: 75 ms of a one-shot search | a binary term table would load in ~10 ms | not done: it is a file-format change | the next step for the CLI |
+
+`hit_spans` must agree with the tokenizer exactly, or the snippets would highlight different words than
+the index matched. It checks every regex candidate against the tokenizer's own rules - is this a token start,
+what is the whole token, how does it normalize - and falls back to the old scan when case folding changes the
+length of the text (`ß` -> `ss`). A Hypothesis property compares it with the old path on generated text full
+of awkward cases (`ß`, `ΣΟΦΟΣ`, combining marks, `don't`, `__init__`); it held for 20,000 examples, and on all
+1,301 documents × 10 term sets it returns the same hits.
+
+End to end, a query nobody asked before (query cache off, snippets on; `scripts/bench_search.py`, run once with
+`PYTHONPATH` pointing at a `lab-07` worktree and once on `lab-08`):
+
+| Query | Lab 7 | Lab 8 | Faster |
+|---|---|---|---|
+| `python` | 15.34 ms | 3.11 ms | 4.9× |
+| `walrus` | 33.77 ms | 4.59 ms | 7.4× |
+| `global interpreter lock` | 31.22 ms | 7.48 ms | 4.2× |
+| `the` | 50.88 ms | 15.87 ms | 3.2× |
+| `"event loop" NOT asyncio` | 38.70 ms | 8.71 ms | 4.4× |
+| `unicode normalization` | 21.16 ms | 11.49 ms | 1.8× |
+
+After the change the snippets are still 94% of a new query, but now it is native time: the regex scan 28%,
+`zlib.decompress` 22%, the case-folded copy 10%, the NFC check 7% (Scalene). What is left is proportional to
+the document size; the next step is algorithmic - decompress incrementally and stop at the first window that
+covers every query term - not more NumPy.
+
+**Benchmarks in CI.** `tests/test_benchmarks.py` benchmarks `Searcher.search` (both engines, four query
+shapes) and `build_index` on a generated Zipf-distributed corpus with `pytest-benchmark`; the CI job uploads
+the timings as an artifact. Absolute timings vary between runners, so the test that can fail CI is a ratio
+measured in the same run: the NumPy engine must stay at least 5× faster than the Python one on the most common
+term. If a Python loop sneaks back into the hot path, that test fails.
+
+### M2 - Vectorize the scorer
+
+A term's postings become two `int32` arrays that **view the memory-mapped file**: `np.frombuffer(mmap,
+dtype=np.int32, count=df, offset=...)` - no copy, no objects (the file stores `uint32`; every id and count is
+below 2^31). Document lengths are one `int32[N]` array. The Boolean query becomes masks: a term is
+`mask[doc_ids] = True`, `AND`/`OR`/`NOT` are `&`, `|`, `~`, and a phrase intersects `(doc << 32) | (position - i)`
+keys of its terms with `np.intersect1d` - Lab 3's two-pointer merge on positions, in C. Scoring one term for
+every matching document is one expression, written operation for operation like Lab 3's scalar code:
+
+```python
+length_norm = 1 - b + b * index.doc_len_array[doc_ids] / index.avg_doc_length  # fancy indexing
+scores[doc_ids] += idf * tf * (k1 + 1) / (tf + k1 * length_norm)  # ufuncs; ids are unique
+```
+
+then `np.argpartition` picks the top k in O(n). `uv run python scripts/bench_numpy.py index.bin` - ranking only,
+cache off, no snippets, both engines checked to return the same list first:
+
+| Query | Docs matched | Lab 3 scorer (ms) | NumPy scorer (ms) | Speedup |
+|---|---|---|---|---|
+| common term (`python`) | 1,207 | 2.722 | 0.080 | 33.9× |
+| rare term (`walrus`) | 16 | 0.043 | 0.054 | 0.8× |
+| 3-term query (`global interpreter lock`) | 73 | 1.181 | 0.112 | 10.5× |
+| most common term (`the`) | 1,296 | 13.505 | 0.087 | 155.6× |
+| phrase of common words (`"in the"`) | 1,169 | 38.277 | 4.832 | 7.9× |
+
+- **Common terms: 34-156×.** Lab 3 builds 1,207 `Posting` objects and calls `score()` 1,207 times - each call a
+  frame, attribute lookups, boxed floats. NumPy runs a dozen C loops over 1,207 numbers. Its cost hardly moves
+  from `python` to `the` (0.080 -> 0.087 ms): it is mostly the fixed price of a dozen NumPy calls, while the
+  Python engine's cost grows with every posting.
+- **The rare term is slower (0.8×).** Sixteen postings cost Lab 3 about 40 µs. The NumPy engine pays its fixed
+  overhead anyway - three `zeros(1301)` arrays, a dozen ufunc dispatches of 1-3 µs each, `flatnonzero`,
+  `argpartition` - about 50 µs. Vectorization amortizes a per-call cost over many elements; with 16 elements
+  there is nothing to amortize. A cut-over (Python below ~50 postings) would win those microseconds back; I left
+  the engine uniform, because 0.05 ms is not where a query's time goes.
+- **Three terms: 10×.** The AND keeps 73 documents, but all three postings lists (hundreds of entries each) are
+  read and masked; the Python engine walked them posting by posting.
+- **Phrase: 8×.** Every position of `in` and `the` becomes an `int64` key (about 280,000) and
+  `np.intersect1d` sorts them: O(n log n) in C instead of O(n) in Python. Still the slowest query here.
+
+**Identical rankings, tested.** `tests/test_vector.py` runs both engines on the fixture corpus - 11 queries
+(phrases, `NOT`, `OR`, an unknown word) × 2 scorers × 3 values of k - and asserts the same documents, in the
+same order, with **equal** floats (`==`, not "approximately"); the masks must equal Lab 3's `frozenset`s; and a
+Hypothesis property repeats both checks on random corpora and random query trees. Bit-identical scores are a
+design decision, not luck: the arithmetic runs in the same order, the IDF is the same `math.log` float, `log(tf)`
+for TF-IDF comes from a table filled with `math.log` (`np.log` may round the last bit differently), and both
+engines break ties the same way - higher score, then lower doc id. That last part needed care:
+`np.argpartition` picks *arbitrary* members of a tie at the k-th place, so the engine takes the tied documents
+in doc-id order; the Lab 3 engine got the same rule as its `heapq.nlargest` key.
+
+**Free-threaded.** Lab 7's regression test - 16 threads searching one memory-mapped index - now runs for both
+engines and passes on 3.14t: `np.frombuffer` asks the `mmap` for its own buffer on every call, like the
+per-call `memoryview` fix. `onnxruntime` and `tokenizers` load without re-enabling the GIL.
+
+### M3 - Semantic and hybrid search
+
+```text
+findex embed index.bin
+  1,301 documents -> 32,367 chunks of 160 words (a new chunk every 128 words: 32 words of overlap)
+  -> all-MiniLM-L6-v2 (ONNX Runtime): 384 floats per chunk, L2-normalized
+  -> index.vectors.npy (32,367 × 384 float32 = 47.4 MiB, memory-mapped) + index.chunks.npy (doc, start, end)
+embedded 32,367 chunks of 1,301 documents with all-MiniLM-L6-v2 (384 dims) in 2271.3 s (14 chunks/s)
+```
+
+That run used ONNX Runtime's default thread count, which is the number of *physical* cores - one on this
+VM. `findex embed` now asks for every usable CPU (`os.process_cpu_count()`): 26.1 instead of 14.4 chunks/s on
+both vCPUs (a 384-chunk sample), so about 20 minutes here. A query is embedded in 8 ms on one core.
+
+- **The model without PyTorch.** sentence-transformers runs all-MiniLM-L6-v2 as tokenizer -> BERT -> mean
+  pooling -> normalization. findex runs the model's own ONNX export with ONNX Runtime and the `tokenizers`
+  library, and does the pooling itself in NumPy: `(hidden * mask[:, :, None]).sum(1) / mask.sum(1)`, padding
+  excluded, then `x / ||x||`. That is 75 MB of dependencies (onnxruntime 63, tokenizers 12) instead of
+  PyTorch's several hundred, which matters in the Docker image. The download is pinned to a model revision and
+  checked against SHA-256 hashes (Hugging Face publishes the model file's); it happens once, in the Docker build or on the first
+  `findex embed`, never at query time. Both are an optional extra (`findex[semantic]`), so keyword search
+  installs anywhere, including the free-threaded build on macOS, where onnxruntime has no wheel.
+- **Chunks, best chunk wins.** A 40-page document has one topic per section; its mean vector is mush. A document's
+  semantic score is its best chunk's cosine, and that chunk is what the UI shows when the document shares no word
+  with the question. The chunks are stored grouped by document, so "best chunk per document" is one
+  `np.maximum.reduceat` over the segments.
+- **Cosine is a dot product.** All rows are unit length, so `E @ q` gives all 32,367 similarities at once:
+  **1.8 ms** for the matrix-vector product, 1.9 ms with the per-document maximum. Brute force is exact, and at this
+  size there is nothing to win with an approximate index; HNSW starts to pay off around a million vectors.
+- **Hybrid = RRF.** BM25 scores are unbounded and cosines live in [-1, 1], so adding them would need a calibration
+  that changes per query. Reciprocal rank fusion uses only ranks: `score(d) = Σ 1/(60 + rank)` over the top 100 of
+  each list. A document high in both lists wins; a document only one list found still gets in.
+- **Where.** `findex search --mode keyword|semantic|hybrid`, `GET /search?mode=...` (400 with an explanation if the
+  server has no embeddings), a Keyword / Meaning / Hybrid selector in the UI, `"semantic": true` in `/health`. The
+  Docker image builds the embeddings at build time (`--build-arg EMBED=0` gives a keyword-only image in minutes;
+  CI builds that one on every push, `image.yml` the full one). The query operators are stripped before a query is
+  embedded (`NOT` is a keyword-side idea; in hybrid mode the keyword half still honours it).
+- **Tested offline, checked against the original.** A `HashingEmbedder` (feature hashing of the tokens - lexical,
+  not semantic) exercises the whole pipeline in the tests and in CI without a model download; a 2 KB ONNX model
+  with the real model's interface (generated by `tests/data/make_tiny_minilm.py`) checks the ONNX code path itself,
+  including that a batch padded to its longest text gives the same vectors as embedding each text alone. With the
+  real model, my tokenizer + ONNX + mean-pooling pipeline reproduces the similarities printed on the model card to
+  four decimals ("That is a happy person" vs "...happy dog" 0.6946, "...very happy person" 0.9429, "Today is a
+  sunny day" 0.2569), so it computes what sentence-transformers computes.
+
+### Evaluation: keyword vs semantic vs hybrid, 15 queries
+
+The Lab 3 set (10 hand-labelled queries) plus **five paraphrases** - questions that describe a topic in other
+words than the documents use, labelled by the same rule (`eval/queries.json`, `"paraphrase": true`):
+
+| Paraphrase | What it is about | Relevant |
+|---|---|---|
+| *find out how long a piece of code takes to run* | `timeit`, the profilers (`profile`, `profiling` and its tracing and sampling pages), the perf HOWTO, PEP 418/564 clocks | 8 |
+| *use every processor core from one program* | `multiprocessing`, `concurrent.futures`, `concurrent.interpreters`, free threading, PEP 371/554/684/703/734 | 9 |
+| *turn an object into bytes and back again* | `pickle`, `marshal`, `copyreg`, pickle PEPs 307/3154/574 | 6 |
+| *write messages about what my program is doing to a file* | `logging` and its HOWTO, cookbook, handlers, config, PEP 282 | 6 |
+| *remember the results of slow function calls* | `functools` (`cache`, `lru_cache`) | 1 |
+
+Keyword search, as expected, finds almost nothing for them: their words are common, implicit AND requires all
+of them, and the documents say *profile*, *serialize*, *memoize* instead. The keyword column of the original ten
+reproduces Lab 3 (0.74 here, 0.72 on the Mac).
+
+Labels are made the Lab 3 way, and for all 15 queries the pool now holds the top 10 of all three modes: a
+document only semantic search finds is judged, not silently counted as a miss. That added 10 relevant documents
+to the original ten (PEP 653 on pattern-matching semantics, PEP 346 on `with`, newer typing PEPs, ...) under the
+same rule: primarily about the topic, or the reference section that defines it (as the data model's
+context-manager section already counted in Lab 3); a What's New page only when the topic is its headline (3.10
+and pattern matching); glossary entries and passing mentions never.
+
+`findex embed index.bin && uv run python scripts/evaluate.py index.bin --modes`:
+
+| Query | relevant | keyword P@5 | semantic P@5 | hybrid P@5 |
+|---|---|---|---|---|
+| `global interpreter lock` | 7 | 0.6 | 0.8 | 1.0 |
+| `structural pattern matching` | 8 | 1.0 | 1.0 | 1.0 |
+| `generic type hints` | 15 | 1.0 | 0.8 | 0.8 |
+| `virtual environment` | 8 | 1.0 | 0.8 | 1.0 |
+| `f-string formatting` | 4 | 0.2 | 0.4 | 0.4 |
+| `async generator` | 4 | 0.6 | 0.4 | 0.6 |
+| `dataclass frozen slots` | 3 | 0.4 | 0.6 | 0.4 |
+| `context manager with statement` | 8 | 0.8 | 0.8 | 1.0 |
+| `unicode normalization` | 5 | 0.8 | 0.4 | 1.0 |
+| `reference counting garbage collection` | 9 | 1.0 | 0.6 | 1.0 |
+| *find out how long a piece of code takes to run* (paraphrase) | 8 | 0.0 | 0.6 | 0.2 |
+| *use every processor core from one program* (paraphrase) | 9 | 0.0 | 0.8 | 0.2 |
+| *turn an object into bytes and back again* (paraphrase) | 6 | 0.0 | 0.0 | 0.0 |
+| *write messages about what my program is doing to a file* (paraphrase) | 6 | 0.2 | 0.4 | 0.2 |
+| *remember the results of slow function calls* (paraphrase) | 1 | 0.0 | 0.2 | 0.0 |
+| mean, original 10 | | 0.74 | 0.66 | **0.82** |
+| mean, 5 paraphrases | | 0.04 | **0.40** | 0.12 |
+| **mean, all 15** | | 0.51 | 0.57 | **0.59** |
+
+What the table says:
+
+- **On the paraphrases, keyword search fails as predicted (0.04) and semantic search does not (0.40).** For *find
+  out how long a piece of code takes to run* it returns `timeit` and `profile` first; for *use every processor
+  core*, after What's New in 3.12, PEP 703, `concurrent.interpreters`, PEP 684 and PEP 371. Keyword search finds documents that happen to
+  contain all of *find, out, how, long, piece, code, takes, run* - PEP 238, `optparse` - because without stop words
+  and with an implicit AND, a sentence is a strange query.
+- **On the original queries, semantic alone is worse than BM25 (0.66 vs 0.74).** Those queries are made of exact
+  terms, and the model keeps the general subject but lets the specific word go: for `unicode normalization` it
+  returns What's New in 3.15, the Expressions chapter and PEP 100 - Unicode in general (0.4 vs 0.8); for
+  `reference counting garbage collection`, PEP 454 (`tracemalloc`) and the data model - memory in general
+  (0.6 vs 1.0). One rare word in a 160-word chunk moves its vector only a little; for BM25 it is the whole score.
+  The model wins where the documents use other words than the query: `f-string formatting` (0.2 -> 0.4) and
+  `dataclass frozen slots` (0.4 -> 0.6), the two queries the Lab 3 tokenizer lost, and `global interpreter lock`
+  (0.6 -> 0.8).
+- **Hybrid is the best on the original ten (0.82)**: RRF keeps BM25's exact hits and adds what the model found -
+  `global interpreter lock` 0.6 -> 1.0 with PEP 311 (semantic #1, keyword #7). It also rewards agreement: the
+  Unicode HOWTO is #8 for keywords and #6 for meaning, and #3 after fusion, which takes `unicode normalization`
+  to 1.0.
+- **But hybrid loses most of semantic's gain on the paraphrases (0.40 -> 0.12)**, and that is the most useful line
+  in the table. RRF trusts both lists equally, and for a paraphrase the keyword list is confidently wrong: eight to
+  twenty-six documents that contain every common word of the sentence, ranked at the top. RRF cannot tell a good
+  list from a bad one by ranks alone. Fixes worth trying next: weight the fusion per query (trust the keyword side
+  less when it matched few documents, or when most query terms have low IDF), or give natural-language queries an
+  OR keyword side.
+- **One paraphrase fails everywhere**: *turn an object into bytes and back again*. The model reads "bytes" as the
+  type and returns PEP 358 (*The "bytes" Object*) and the bytes C API, not serialization; my paraphrase leaned on a
+  word that has a more literal meaning in this corpus.
+
+**What I learned.** Profile before optimizing: I would have vectorized the scorer, and the scorer was 4% of a
+query; the snippets were 93%. Scalene's Python/native split was the most useful number, and it says something
+subtle - "native" time can still be the interpreter's fault when it is millions of tiny C calls issued by a Python
+loop; the cure is fewer calls, not faster Python. NumPy wins by amortizing a fixed per-call cost over many
+elements, so it lost on the 16-posting query. And bit-for-bit equality with the old engine was something I had to
+design for - operation order, the same `math.log`, an explicit tie rule - which is exactly what made "the ranking
+did not change" a test instead of a hope. On the semantic side, the lesson is how little machinery is needed -
+cosine similarity over normalized vectors is one matrix-vector product - and that evaluation is what keeps it
+honest: hybrid search was the best mode on the queries I wrote first, yet kept less than a third of the
+semantic gain on the paraphrases it was supposed to rescue (0.12 vs 0.40) - invisible without the paraphrase
+rows. So was the pooling: judged only from keyword results, the original ten scored semantic search 0.60
+instead of 0.66, because the relevant documents only it found had never been labelled.
+
+## Limitations and next steps
+
+- **No stemming, identifiers kept whole.** `strings` does not match `string`, and `slots` does not match
+  `__slots__` - that is why `f-string formatting` and `dataclass frozen slots` stay low for keyword search (Lab 3).
+  Semantic search partly covers it; a stemmer would change the index format and the phrase rules.
+- **Snippets cost grows with document length.** A cold query still decompresses and normalizes each result's full
+  text. Next: incremental decompression that stops at the first window covering all query terms.
+- **Start-up of a one-shot CLI search** is dominated by parsing the JSON term table (75 ms for 95,669 terms). Next:
+  a binary term table (sorted terms + NumPy offset arrays) in format version 3.
+- **The index is immutable.** New documents mean a rebuild (about a second with processes); embeddings are rebuilt
+  too. An incremental segment-and-merge design, like Lucene's, would be the next architecture step.
+- **The semantic model is English and truncates at 256 word pieces**; long chunks lose their tail. The corpus is
+  English, so this is fine here; a Ukrainian corpus would need a multilingual model.
+- **Hybrid fusion is unweighted.** RRF gives a confidently wrong keyword list the same say as the model (hybrid 0.12
+  vs semantic 0.40 on paraphrases). Next: per-query weights, or an OR keyword side for natural-language queries.
+- **One replica on one homelab node.** The ThinkPad is a single point of failure; Cloudflare in front absorbs the
+  public side, not a dead node.
+- **Measurements across two machines.** Labs 1-7 on the M4, Lab 8 on a cloud VM: ratios compare, absolute
+  milliseconds do not.

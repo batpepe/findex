@@ -3,6 +3,13 @@
 {% block content %}
 <form class="search" action="/" method="get" role="search">
   <input type="search" name="q" value="{{ q }}" placeholder='asyncio TaskGroup, "event loop" NOT tkinter, free-threaded' autofocus aria-label="Query">
+  {% if semantic %}
+  <select name="mode" aria-label="Search mode">
+    <option value="keyword" {% if mode == "keyword" %}selected{% endif %}>Keyword</option>
+    <option value="semantic" {% if mode == "semantic" %}selected{% endif %}>Meaning</option>
+    <option value="hybrid" {% if mode == "hybrid" %}selected{% endif %}>Hybrid</option>
+  </select>
+  {% endif %}
   <select name="scorer" aria-label="Ranking">
     <option value="bm25" {% if scorer == "bm25" %}selected{% endif %}>BM25</option>
     <option value="tfidf" {% if scorer == "tfidf" %}selected{% endif %}>TF-IDF</option>
@@ -13,7 +20,7 @@
 {% if error %}
   <p class="error">{{ error }}</p>
 {% elif result %}
-  <p class="summary">{{ "{:,}".format(result.total) }} documents match · page {{ page }} of {{ pages }} · {{ result.took_ms }} ms</p>
+  <p class="summary">{% if mode == "keyword" %}{{ "{:,}".format(result.total) }} documents match{% elif mode == "semantic" %}ranked by meaning{% else %}keyword + meaning, fused (RRF){% endif %} · page {{ page }} of {{ pages }} · {{ result.took_ms }} ms</p>
   <ol class="results" start="{{ (page - 1) * 10 + 1 }}">
     {% for r in result.results %}
     <li>
@@ -21,7 +28,7 @@
       <div class="meta">
         {% set url = source_url(r.path) %}
         {% if url %}<a href="{{ url }}" rel="nofollow">{{ url }}</a>{% else %}{{ r.path }}{% endif %}
-        · score {{ "%.2f" | format(r.score) }}
+        · score {{ ("%.4f" if mode == "hybrid" else "%.2f") | format(r.score) }}
       </div>
       {% if r.snippet %}<p class="snippet">{{ r.snippet.html() | safe }}</p>{% endif %}
     </li>
@@ -29,19 +36,21 @@
   </ol>
   {% if pages > 1 %}
   <nav class="pager" aria-label="Pages">
-    {% if page > 1 %}<a href="/?q={{ q | urlencode }}&scorer={{ scorer }}&page={{ page - 1 }}">← previous</a>{% endif %}
-    {% if page < pages and page < 100 %}<a href="/?q={{ q | urlencode }}&scorer={{ scorer }}&page={{ page + 1 }}">next →</a>{% endif %}
+    {% if page > 1 %}<a href="/?q={{ q | urlencode }}&scorer={{ scorer }}&mode={{ mode }}&page={{ page - 1 }}">← previous</a>{% endif %}
+    {% if page < pages and page < 100 %}<a href="/?q={{ q | urlencode }}&scorer={{ scorer }}&mode={{ mode }}&page={{ page + 1 }}">next →</a>{% endif %}
   </nav>
   {% endif %}
 {% else %}
   <section class="intro">
     <p>{{ "{:,}".format(index.num_docs) }} documents, {{ "{:,}".format(index|length) }} distinct terms.
-       Words are ANDed; use <code>OR</code>, <code>NOT</code>, parentheses and <code>"quoted phrases"</code>.</p>
+       Words are ANDed; use <code>OR</code>, <code>NOT</code>, parentheses and <code>"quoted phrases"</code>.
+       {% if semantic %}Or switch to <b>Meaning</b> and ask in your own words.{% endif %}</p>
     <p>Try:
       <a href="/?q=asyncio+TaskGroup">asyncio TaskGroup</a> ·
       <a href="/?q=%22event+loop%22+NOT+asyncio">"event loop" NOT asyncio</a> ·
       <a href="/?q=free-threaded+GIL">free-threaded GIL</a> ·
       <a href="/?q=pyproject+build+backend">pyproject build backend</a>
+      {% if semantic %}· <a href="/?q=find+out+how+long+a+piece+of+code+takes+to+run&mode=semantic">find out how long a piece of code takes to run</a>{% endif %}
     </p>
   </section>
 {% endif %}

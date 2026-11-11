@@ -29,11 +29,19 @@ from itertools import islice
 from pathlib import Path
 from typing import Protocol
 
+import numpy as np
+import numpy.typing as npt
+
 from findex.corpus import Document, iter_documents
 from findex.timing import timed
 from findex.tokenize import tokenize
 
 log = logging.getLogger(__name__)
+
+# NumPy views used by the vectorized engine (Lab 8). The file stores uint32; every
+# value (doc id, tf, position) is far below 2**31, so the same bytes read as int32.
+type I32 = npt.NDArray[np.int32]
+type Mask = npt.NDArray[np.bool_]
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +114,17 @@ class ArrayPostings(Mapping[str, list[Posting]]):
     def __getitem__(self, term: str) -> list[Posting]:
         return decode_postings(*self.raw(term))
 
+    def arrays(self, term: str) -> tuple[I32, I32]:
+        """``(doc_ids, tfs)`` as NumPy arrays that share the ``array('I')`` buffers (no copy)."""
+        doc_ids, tfs, _ = self._arrays[term]
+        return np.frombuffer(doc_ids, dtype=np.int32), np.frombuffer(tfs, dtype=np.int32)
+
+    def position_arrays(self, term: str) -> I32:
+        """All positions of the term, concatenated in doc order (``tfs`` say how many per doc)."""
+        if not self._has_positions:
+            raise LookupError("this index was built without positions")
+        return np.frombuffer(self._arrays[term][2], dtype=np.int32)
+
     def __iter__(self) -> Iterator[str]:
         return iter(self._arrays)
 
@@ -177,6 +196,26 @@ class Index(Mapping[str, list[Posting]]):
     @functools.cached_property
     def all_doc_ids(self) -> frozenset[int]:
         return frozenset(self.doc_lengths)
+
+    @functools.cached_property
+    def doc_id_bound(self) -> int:
+        """One past the largest doc id: the length of every per-document NumPy array."""
+        return max(self.doc_lengths, default=-1) + 1
+
+    @functools.cached_property
+    def doc_len_array(self) -> I32:
+        """Every document's length at once, indexed by doc id (BM25's ``doc_len[doc_ids]``)."""
+        lengths = np.zeros(self.doc_id_bound, dtype=np.int32)
+        ids = np.fromiter(self.doc_lengths.keys(), dtype=np.intp, count=len(self.doc_lengths))
+        lengths[ids] = np.fromiter(self.doc_lengths.values(), dtype=np.int32, count=len(self.doc_lengths))
+        return lengths
+
+    @functools.cached_property
+    def doc_mask(self) -> Mask:
+        """``True`` at every doc id that exists: the universe a ``NOT`` complements against."""
+        mask = np.zeros(self.doc_id_bound, dtype=np.bool_)
+        mask[np.fromiter(self.doc_lengths.keys(), dtype=np.intp, count=len(self.doc_lengths))] = True
+        return mask
 
     def doc_length(self, doc_id: int) -> int:
         return self.doc_lengths[doc_id]

@@ -38,7 +38,9 @@ from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
-from findex.index import CompressedTexts, DocMeta, Index, Posting, RawPostings, decode_postings
+import numpy as np
+
+from findex.index import I32, CompressedTexts, DocMeta, Index, Posting, RawPostings, decode_postings
 from findex.timing import timed
 
 type Format = Literal["binary", "pickle"]
@@ -225,6 +227,26 @@ class MappedPostings(Mapping[str, list[Posting]]):
 
     def __getitem__(self, term: str) -> list[Posting]:
         return decode_postings(*self.raw(term))
+
+    def arrays(self, term: str) -> tuple[I32, I32]:
+        """``(doc_ids, tfs)`` as read-only NumPy arrays *over the mapped file*: no copy, no objects.
+
+        ``np.frombuffer`` asks the ``mmap`` for a fresh buffer each call (like the
+        per-call memoryview above), so this is safe from many threads.
+        """
+        offset, df, _ = self._terms[term]
+        start = self._data_start + offset
+        doc_ids = np.frombuffer(self._mapped, dtype=np.int32, count=df, offset=start)
+        tfs = np.frombuffer(self._mapped, dtype=np.int32, count=df, offset=start + 4 * df)
+        return doc_ids, tfs
+
+    def position_arrays(self, term: str) -> I32:
+        """All positions of the term, concatenated in doc order, as a NumPy view of the file."""
+        if not self._has_positions:
+            raise LookupError("this index was built without positions")
+        offset, df, total_tf = self._terms[term]
+        start = self._data_start + offset + 8 * df
+        return np.frombuffer(self._mapped, dtype=np.int32, count=total_tf, offset=start)
 
     def __iter__(self) -> Iterator[str]:
         return iter(self._terms)

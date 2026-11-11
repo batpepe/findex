@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.3.1
-      - run: uv sync --locked
+      - run: uv sync --locked --extra semantic
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pyright
@@ -31,8 +31,24 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.1
         with:
           python-version: ${{ matrix.python }}
+      - run: uv sync --locked --extra semantic
+      # benchmarks run once each here (correctness); their timings come from the job below
+      - run: uv run pytest --cov --cov-report=term --benchmark-disable
+
+  benchmark:
+    name: benchmarks (pytest-benchmark)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.1
       - run: uv sync --locked
-      - run: uv run pytest --cov --cov-report=term
+      # absolute timings vary between runners, so they are recorded, not asserted; the
+      # numpy-vs-python ratio guard (tests/test_benchmarks.py) is what fails on a regression
+      - run: uv run pytest tests/test_benchmarks.py --benchmark-only --benchmark-json=benchmark.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: benchmark-${{ github.sha }}
+          path: benchmark.json
 
   wheel:
     name: build + install the wheel
@@ -48,7 +64,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - run: docker build -t findex:ci .
+      # keyword-only (EMBED=0): embedding 32k chunks takes too long for every push; image.yml builds the full one
+      - run: docker build --build-arg EMBED=0 -t findex:ci .
       - name: smoke test
         run: |
           docker run -d --name findex -p 8000:8000 findex:ci
@@ -57,4 +74,5 @@ jobs:
             sleep 1
           done
           curl -fsS "http://127.0.0.1:8000/search?q=asyncio+TaskGroup&k=1"
+          curl -fsS http://127.0.0.1:8000/health | grep -q '"semantic":false'
           docker stop findex

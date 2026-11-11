@@ -105,7 +105,7 @@ def test_stats(client: TestClient) -> None:
 
 
 def test_health(client: TestClient) -> None:
-    assert client.get("/health").json() == {"status": "ok", "documents": 6}
+    assert client.get("/health").json() == {"status": "ok", "documents": 6, "semantic": False}
 
 
 def test_health_is_503_without_an_index() -> None:
@@ -121,7 +121,7 @@ def test_lifespan_loads_the_index_from_the_environment(
     get_settings.cache_clear()
     monkeypatch.setenv("INDEX_PATH", str(index_file))
     with TestClient(app) as client:  # entering the context runs the lifespan
-        assert client.get("/health").json() == {"status": "ok", "documents": 6}
+        assert client.get("/health").json() == {"status": "ok", "documents": 6, "semantic": False}
         assert client.get("/search", params={"q": "walrus"}).json()["total"] == 1
     monkeypatch.setenv("INDEX_PATH", str(tmp_path / "missing.bin"))
     get_settings.cache_clear()

@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     log_json: bool = False  # one JSON object per log line, for the platform's log collector
     cors_origins: list[str] = Field(default_factory=list[str])  # empty: same-origin only
     search_cache_size: int = Field(default=512, ge=0)
+    model_dir: Path | None = None  # where the embedding model lives (FINDEX_MODEL_DIR also works)
 
 
 @functools.cache

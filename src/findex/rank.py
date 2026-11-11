@@ -6,6 +6,11 @@ scorer, keeps the ``k`` best with ``heapq.nlargest`` (O(n log k), not a full
 sort), and attaches a highlighted snippet to each. The query -> ranked ids step
 is memoized with ``functools.lru_cache``; repeated queries skip straight to
 the snippets.
+
+Two engines compute that ranking (Lab 8): ``"python"`` is the Lab 3 code below,
+one ``Posting`` and one ``score()`` call at a time; ``"numpy"`` (the default) is
+``findex.vector``, the same arithmetic on whole postings arrays. They return
+identical rankings; ties go to the lower doc id in both.
 """
 
 from __future__ import annotations
@@ -17,21 +22,55 @@ import math
 from collections import defaultdict
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
-from operator import itemgetter
-from typing import NamedTuple, Protocol, overload
+from typing import Literal, NamedTuple, Protocol, overload
 
-from findex.index import Index, Posting
-from findex.query import Node, parse, positive_terms
+import numpy as np
+
+from findex import vector
+from findex.index import I32, Index, Posting
+from findex.query import Node, QueryError, parse, positive_terms
+from findex.semantic import Embedder, VectorIndex, chunk_snippet, rrf, semantic_rank, semantic_text
 from findex.snippets import Snippet, make_snippet
 from findex.timing import timed
+from findex.tokenize import tokenize
+from findex.vector import F64, VectorScorer
 
 log = logging.getLogger(__name__)
 
+type Engine = Literal["numpy", "python"]
+ENGINES: tuple[Engine, ...] = ("numpy", "python")
+type Mode = Literal["keyword", "semantic", "hybrid"]
+MODES: tuple[Mode, ...] = ("keyword", "semantic", "hybrid")
+RRF_DEPTH = 100  # hybrid fuses this many results from each ranking
 
-class Scorer(Protocol):
-    """Anything with this method is a scorer - no inheritance needed (structural typing)."""
+
+class Scorer(VectorScorer, Protocol):
+    """Anything with these methods is a scorer - no inheritance needed (structural typing).
+
+    ``score`` scores one posting (the Lab 3 engine); ``score_array`` (from
+    ``VectorScorer``) scores a whole postings list at once (the NumPy engine).
+    """
 
     def score(self, term: str, posting: Posting, index: Index) -> float: ...
+
+
+_log_table: F64 = np.zeros(1)  # _log_table[tf] == math.log(tf) for tf >= 1; grown on demand
+
+
+def log_tf(tfs: I32) -> F64:
+    """``math.log`` of every tf, by table lookup: the exact floats Lab 3's scalar code computes.
+
+    (``np.log`` may round differently from the C library in the last bit; a
+    table filled with ``math.log`` keeps the two engines bit-for-bit identical.)
+    """
+    global _log_table
+    table = _log_table
+    top = int(tfs.max(initial=0))
+    if top >= table.size:
+        size = max(top + 1, 2 * table.size, 1024)
+        table = np.array([0.0] + [math.log(tf) for tf in range(1, size)])
+        _log_table = table  # a race only builds the same table twice
+    return table[tfs]
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +85,9 @@ class TfIdf:
 
     def score(self, term: str, posting: Posting, index: Index) -> float:
         return (1 + math.log(posting.tf)) * math.log(index.num_docs / index.df(term))
+
+    def score_array(self, term: str, doc_ids: I32, tfs: I32, index: Index) -> F64:
+        return (1 + log_tf(tfs)) * math.log(index.num_docs / index.df(term))
 
     def __call__(self, term: str, posting: Posting, index: Index) -> float:
         return self.score(term, posting, index)
@@ -71,6 +113,12 @@ class BM25:
     def score(self, term: str, posting: Posting, index: Index) -> float:
         length_norm = 1 - self.b + self.b * index.doc_length(posting.doc_id) / index.avg_doc_length
         tf = posting.tf
+        return self.idf(term, index) * tf * (self.k1 + 1) / (tf + self.k1 * length_norm)
+
+    def score_array(self, term: str, doc_ids: I32, tfs: I32, index: Index) -> F64:
+        # the same expression, operation for operation, on arrays: bit-identical floats
+        length_norm = 1 - self.b + self.b * index.doc_len_array[doc_ids] / index.avg_doc_length
+        tf = tfs.astype(np.float64)
         return self.idf(term, index) * tf * (self.k1 + 1) / (tf + self.k1 * length_norm)
 
     def __call__(self, term: str, posting: Posting, index: Index) -> float:
@@ -122,20 +170,75 @@ class ResultList(Sequence[SearchResult]):
         return f"ResultList(query={self.query!r}, shown={len(self)}, total={self.total})"
 
 
-class Searcher:
-    """Ranked search over one index, with an LRU cache on query -> ranked doc ids."""
+def _best_first(item: tuple[int, float]) -> tuple[float, int]:
+    doc_id, score = item
+    return score, -doc_id  # higher score first; on a tie the lower doc id (as in findex.vector)
 
-    def __init__(self, index: Index, cache_size: int = 256) -> None:
+
+class SemanticUnavailable(LookupError):
+    """``mode="semantic"``/``"hybrid"`` without embeddings: run ``findex embed`` first."""
+
+
+type Ranking = tuple[int, tuple[tuple[int, float], ...], tuple[tuple[int, int], ...]]  # + best chunks
+
+
+class Searcher:
+    """Ranked search over one index, with an LRU cache on query -> ranked doc ids.
+
+    ``mode="keyword"`` is the query language + BM25/TF-IDF; ``"semantic"`` ranks
+    documents by their best chunk's cosine similarity to the embedded query;
+    ``"hybrid"`` fuses the two rankings with RRF (``findex.semantic``).
+    """
+
+    def __init__(
+        self,
+        index: Index,
+        cache_size: int = 256,
+        engine: Engine = "numpy",
+        *,
+        vectors: VectorIndex | None = None,
+        embedder: Embedder | None = None,
+    ) -> None:
         self.index = index
+        self.engine = engine
+        self.vectors = vectors
+        self.embedder = embedder
         # a per-instance cache: lru_cache on the method itself would be shared by all
         # instances and keep every index ever searched alive
-        self._ranked = functools.lru_cache(maxsize=cache_size)(self._rank)
+        rank = self._rank_numpy if engine == "numpy" else self._rank
+        self._ranked = functools.lru_cache(maxsize=cache_size)(rank)
+        self._by_meaning = functools.lru_cache(maxsize=cache_size)(self._rank_semantic)
         self._snippet = functools.lru_cache(maxsize=4 * cache_size)(self._make_snippet)
 
-    def _make_snippet(self, doc_id: int, terms: frozenset[str]) -> Snippet:
+    @property
+    def semantic_ready(self) -> bool:
+        return self.vectors is not None and self.embedder is not None
+
+    def _make_snippet(self, doc_id: int, terms: frozenset[str], chunk: int | None = None) -> Snippet:
+        if chunk is not None and self.vectors is not None:
+            # found by meaning: show the passage that matched, not the window where "the" and
+            # "of" from a natural-language query happen to cluster
+            return chunk_snippet(self.index, self.vectors, chunk)
         return make_snippet(self.index.text(doc_id), terms)
 
+    def _rank_semantic(self, query: str, k: int) -> Ranking:
+        if self.vectors is None or self.embedder is None:
+            raise SemanticUnavailable("no embeddings for this index (run `findex embed` first)")
+        query_vector = self.embedder.embed([semantic_text(query) or query])[0]
+        (total, top), best_chunk = semantic_rank(self.vectors, query_vector, k)
+        return total, top, tuple(best_chunk.items())
+
+    def _rank_hybrid(self, query: str, scorer: Scorer, k: int) -> Ranking:
+        depth = max(k, RRF_DEPTH)  # fuse the top RRF_DEPTH of each list, not just the top k
+        _, keyword = self._ranked(query, scorer, depth)
+        _, semantic, best_chunks = self._by_meaning(query, depth)
+        fused = rrf([doc_id for doc_id, _ in keyword], [doc_id for doc_id, _ in semantic])
+        found_by_words = {doc_id for doc_id, _ in keyword}  # these get a keyword snippet
+        passages = tuple((doc_id, chunk) for doc_id, chunk in best_chunks if doc_id not in found_by_words)
+        return len(fused), tuple(fused[:k]), passages
+
     def _rank(self, query: str, scorer: Scorer, k: int) -> tuple[int, tuple[tuple[int, float], ...]]:
+        """The Lab 3 engine: Python objects and one scorer call per posting."""
         node = parse(query)
         matched = node.evaluate(self.index)
         scores: defaultdict[int, float] = defaultdict(float)
@@ -147,25 +250,52 @@ class Searcher:
                     scores[posting.doc_id] += scorer.score(term, posting, self.index)
         if not scores:  # e.g. "NOT java": matches, but nothing to rank them by
             return len(matched), tuple((doc_id, 0.0) for doc_id in sorted(matched)[:k])
-        top = heapq.nlargest(k, scores.items(), key=itemgetter(1))
+        top = heapq.nlargest(k, scores.items(), key=_best_first)
         log.debug("ranked %r: %d matches, top %d", query, len(matched), len(top))
         return len(matched), tuple(top)
 
+    def _rank_numpy(self, query: str, scorer: Scorer, k: int) -> tuple[int, tuple[tuple[int, float], ...]]:
+        """The Lab 8 engine: masks, array expressions and ``np.argpartition`` (``findex.vector``)."""
+        total, top = vector.rank(self.index, parse(query), scorer, k)
+        log.debug("ranked %r: %d matches, top %d (numpy)", query, total, len(top))
+        return total, top
+
     @timed
     def search(
-        self, query: str, scorer: Scorer | None = None, k: int = 10, *, snippets: bool = True
+        self,
+        query: str,
+        scorer: Scorer | None = None,
+        k: int = 10,
+        *,
+        snippets: bool = True,
+        mode: Mode = "keyword",
     ) -> ResultList:
         scorer = scorer or SCORERS["bm25"]
-        total, top = self._ranked(query, scorer, k)
-        log.debug("query cache: %s", self._ranked.cache_info())
-        terms = frozenset(positive_terms(parse(query))) if snippets else frozenset[str]()
+        best_chunks: dict[int, int] = {}
+        if mode == "keyword":
+            total, top = self._ranked(query, scorer, k)
+            log.debug("query cache: %s", self._ranked.cache_info())
+        elif mode == "semantic":
+            total, top, chunks = self._by_meaning(query, k)
+            best_chunks = dict(chunks)
+        else:
+            total, top, chunks = self._rank_hybrid(query, scorer, k)
+            best_chunks = dict(chunks)
+        terms = frozenset[str]()
+        if snippets:
+            try:
+                terms = frozenset(positive_terms(parse(query)))
+            except QueryError:  # free text in semantic mode need not be a valid keyword query
+                terms = frozenset(tokenize(query))
         results = [
             SearchResult(
                 score,
                 doc_id,
                 self.index.title(doc_id),
                 self.index.doc_meta[doc_id].path,
-                self._snippet(doc_id, terms) if snippets and self.index.texts else None,
+                self._snippet(doc_id, terms, best_chunks.get(doc_id))
+                if snippets and self.index.texts
+                else None,
             )
             for doc_id, score in top
         ]

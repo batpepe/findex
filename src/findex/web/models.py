@@ -43,6 +43,7 @@ class SearchHit(BaseModel):
 class SearchResponse(BaseModel):
     query: str
     scorer: str
+    mode: str = Field(description="keyword, semantic or hybrid")
     total: int = Field(description="Documents matching the query (all pages)")
     page: int
     k: int = Field(description="Results per page")
@@ -96,6 +97,7 @@ class StatsResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     documents: int
+    semantic: bool = Field(default=False, description="Embeddings loaded: mode=semantic/hybrid work")
 
 
 class ErrorResponse(BaseModel):

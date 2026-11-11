@@ -44,11 +44,13 @@ jobs:
           ignore-unfixed: true
           severity: CRITICAL,HIGH
 
-      - name: Smoke test (health, search)
+      - name: Smoke test (keyword, semantic, health)
         run: |
           docker run -d --name findex -p 8000:8000 "$IMAGE:$GITHUB_SHA"
           for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/health && break; sleep 1; done
+          curl -fsS http://127.0.0.1:8000/health | grep -q '"semantic":true'
           curl -fsS "http://127.0.0.1:8000/search?q=asyncio+TaskGroup&k=1" | grep -q '"total"'
+          curl -fsS "http://127.0.0.1:8000/search?q=remember+the+results+of+slow+function+calls&mode=semantic&k=1"
           docker stop findex
 
       - name: Log in to GHCR

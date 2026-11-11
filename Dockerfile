@@ -1,7 +1,8 @@
 # findex: search API + web UI. Three stages:
-#   builder - uv installs the locked dependencies, then the project, into /app/.venv
-#   index   - downloads the corpus (Python docs + PEPs, both freely redistributable) and builds index.bin
-#   runtime - python:3.14-slim with the venv and the index only; runs as a non-root user
+#   builder - uv installs the locked dependencies (with the `semantic` extra), then the project, into /app/.venv
+#   index   - downloads the corpus (Python docs + PEPs, both freely redistributable), builds index.bin,
+#             downloads all-MiniLM-L6-v2 (ONNX) and embeds every chunk: index.vectors.npy (Lab 8)
+#   runtime - python:3.14-slim with the venv, the index, the vectors and the model; runs as a non-root user
 # Build: docker build -t findex .      Run: docker run -p 8000:8000 findex
 # Bring your own index instead: docker run -v $PWD/index.bin:/data/index.bin -e INDEX_PATH=/data/index.bin ...
 
@@ -11,9 +12,9 @@ ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=0 UV_NO_CACHE=1
 WORKDIR /app
 # dependencies first: this layer is reused until uv.lock changes
 COPY pyproject.toml uv.lock README.md LICENSE ./
-RUN uv sync --locked --no-dev --no-install-project
+RUN uv sync --locked --no-dev --extra semantic --no-install-project
 COPY src ./src
-RUN uv sync --locked --no-dev --no-editable
+RUN uv sync --locked --no-dev --extra semantic --no-editable
 
 FROM builder AS index
 RUN apt-get update \
@@ -23,6 +24,12 @@ COPY scripts/get-corpus.sh scripts/get-corpus.sh
 RUN ./scripts/get-corpus.sh \
     && /app/.venv/bin/findex index data/ --out /app/index.bin --executor serial \
     && rm -rf data
+# semantic search: the model is fetched once here (Hugging Face), never at runtime.
+# EMBED=0 skips it (keyword-only image, minutes faster): what CI builds for every pull request.
+ARG EMBED=1
+ENV FINDEX_MODEL_DIR=/app/models
+RUN mkdir -p /app/models \
+    && if [ "$EMBED" = "1" ]; then /app/.venv/bin/findex embed /app/index.bin; fi
 
 FROM python:3.14-slim AS runtime
 # security fixes published after the base image was built (the homelab CI gates on Trivy)
@@ -31,9 +38,12 @@ RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --gid findex --home-dir /app --shell /usr/sbin/nologin findex
 WORKDIR /app
 COPY --from=builder --chown=findex:findex /app/.venv /app/.venv
-COPY --from=index --chown=findex:findex /app/index.bin /app/index.bin
+# index.bin, plus index.vectors.npy / .chunks.npy / .vectors.json when they were built (EMBED=1)
+COPY --from=index --chown=findex:findex /app/index* /app/
+COPY --from=index --chown=findex:findex /app/models /app/models
 ENV PATH="/app/.venv/bin:$PATH" \
     INDEX_PATH=/app/index.bin \
+    FINDEX_MODEL_DIR=/app/models \
     LOG_JSON=true \
     PYTHONUNBUFFERED=1
 USER findex

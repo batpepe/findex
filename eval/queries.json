@@ -1,5 +1,5 @@
 {
-  "about": "Hand-labelled relevance for precision@5. A document is relevant when it is primarily ABOUT the query's topic; passing mentions do not count, and the changelog and the table of contents are never relevant. Labels were made by pooling the top 10 of TF-IDF and BM25 (Lab 3) and adding documents I knew were missing from the pool.",
+  "about": "Hand-labelled relevance for precision@5. A document is relevant when it is primarily ABOUT the query's topic; passing mentions do not count, and the changelog and the table of contents are never relevant. The reference section that defines a topic also counts (the data model's context-manager section); a What's New page counts only when the topic is its headline (3.10 and pattern matching), a glossary entry never. Labels were made by pooling the top 10 of TF-IDF and BM25 (Lab 3) and adding documents I knew were missing from the pool; in Lab 8 the top 10 of semantic and hybrid search were pooled and judged too.",
   "queries": [
     {
       "query": "global interpreter lock",
@@ -22,7 +22,8 @@
         "peps/pep-0636.rst",
         "peps/pep-0642.rst",
         "pydocs/whatsnew/3.10.txt",
-        "pydocs/reference/compound_stmts.txt"
+        "pydocs/reference/compound_stmts.txt",
+        "peps/pep-0653.rst"
       ]
     },
     {
@@ -37,7 +38,12 @@
         "peps/pep-0526.rst",
         "peps/pep-0563.rst",
         "peps/pep-0604.rst",
-        "pydocs/library/typing.txt"
+        "pydocs/library/typing.txt",
+        "peps/pep-0696.rst",
+        "peps/pep-0827.rst",
+        "peps/pep-0649.rst",
+        "peps/pep-0742.rst",
+        "peps/pep-0747.rst"
       ]
     },
     {
@@ -49,7 +55,8 @@
         "peps/pep-0704.rst",
         "peps/pep-0832.rst",
         "peps/pep-0838.rst",
-        "peps/pep-0668.rst"
+        "peps/pep-0668.rst",
+        "peps/pep-0486.rst"
       ]
     },
     {
@@ -86,7 +93,9 @@
         "peps/pep-0377.rst",
         "peps/pep-0806.rst",
         "pydocs/reference/compound_stmts.txt",
-        "pydocs/reference/datamodel.txt"
+        "pydocs/reference/datamodel.txt",
+        "pydocs/builtins/stdtypes.txt",
+        "peps/pep-0346.rst"
       ]
     },
     {
@@ -109,8 +118,70 @@
         "peps/pep-0556.rst",
         "peps/pep-0683.rst",
         "peps/pep-0703.rst",
-        "peps/pep-0848.rst"
+        "peps/pep-0848.rst",
+        "pydocs/c-api/intro.txt"
+      ]
+    },
+    {
+      "query": "find out how long a piece of code takes to run",
+      "paraphrase": true,
+      "relevant": [
+        "pydocs/library/timeit.txt",
+        "pydocs/library/profile.txt",
+        "pydocs/howto/perf_profiling.txt",
+        "peps/pep-0418.rst",
+        "peps/pep-0564.rst",
+        "pydocs/library/profiling.txt",
+        "pydocs/library/profiling.tracing.txt",
+        "pydocs/library/profiling.sampling.txt"
+      ]
+    },
+    {
+      "query": "use every processor core from one program",
+      "paraphrase": true,
+      "relevant": [
+        "pydocs/library/multiprocessing.txt",
+        "pydocs/library/concurrent.futures.txt",
+        "pydocs/howto/free-threading-python.txt",
+        "pydocs/library/concurrent.interpreters.txt",
+        "peps/pep-0703.rst",
+        "peps/pep-0684.rst",
+        "peps/pep-0734.rst",
+        "peps/pep-0371.rst",
+        "peps/pep-0554.rst"
+      ]
+    },
+    {
+      "query": "turn an object into bytes and back again",
+      "paraphrase": true,
+      "relevant": [
+        "pydocs/library/pickle.txt",
+        "pydocs/library/marshal.txt",
+        "pydocs/library/copyreg.txt",
+        "peps/pep-0307.rst",
+        "peps/pep-3154.rst",
+        "peps/pep-0574.rst"
+      ]
+    },
+    {
+      "query": "write messages about what my program is doing to a file",
+      "paraphrase": true,
+      "relevant": [
+        "pydocs/library/logging.txt",
+        "pydocs/howto/logging.txt",
+        "pydocs/howto/logging-cookbook.txt",
+        "pydocs/library/logging.handlers.txt",
+        "pydocs/library/logging.config.txt",
+        "peps/pep-0282.rst"
+      ]
+    },
+    {
+      "query": "remember the results of slow function calls",
+      "paraphrase": true,
+      "relevant": [
+        "pydocs/library/functools.txt"
       ]
     }
-  ]
+  ],
+  "about_paraphrases": "Lab 8: five paraphrase queries that describe a topic in other words than the documents use. Same relevance rule; labels made the Lab 3 way: the top 10 of keyword, semantic and hybrid pooled and judged, plus documents known to be missing from the pool."
 }

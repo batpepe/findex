@@ -1,6 +1,8 @@
 """Shared fixtures: a tiny on-disk corpus in every supported format, and its index."""
 
 import json
+import logging
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -56,3 +58,13 @@ def index_file(corpus_index: Index, tmp_path_factory: pytest.TempPathFactory) ->
     path = tmp_path_factory.mktemp("index") / "index.bin"
     save(corpus_index, path)
     return path
+
+
+@pytest.fixture(autouse=True)
+def restore_findex_logging() -> Iterator[None]:
+    """The web app's lifespan reconfigures the "findex" logger (its own handler, no propagation);
+    put it back after every test so caplog-based tests do not depend on test order."""
+    logger = logging.getLogger("findex")
+    saved = (logger.handlers[:], logger.level, logger.propagate)
+    yield
+    logger.handlers[:], logger.level, logger.propagate = saved

@@ -8,7 +8,7 @@ from collections import Counter
 from collections.abc import Collection
 from dataclasses import dataclass
 
-from findex.tokenize import display_text, token_spans
+from findex.tokenize import display_text, hit_spans
 
 _UNDERLINE = re.compile(r"([*=\-^~#_])\1{3,}")  # reST heading under/overlines
 _SPACE = re.compile(r"\s+")
@@ -45,16 +45,17 @@ def _clean(text: str) -> str:
 def make_snippet(text: str, terms: Collection[str], width: int = 80, max_hits: int = 500) -> Snippet:
     """Window of about ``2 * width`` characters with the most distinct query terms.
 
-    Scans at most ``max_hits`` matches, so a frequent term in a multi-megabyte
-    document does not make one snippet cost a full re-tokenization.
+    The hits come from ``hit_spans`` (one regex over the text, in C) rather than
+    from re-tokenizing the whole document in Python (Lab 8), and at most
+    ``max_hits`` of them are used, so a frequent term in a multi-megabyte
+    document costs little.
     """
     shown = display_text(text)
     hits: list[tuple[int, int, str]] = []
-    for token, start, end in token_spans(shown):
-        if token in terms:
-            hits.append((start, end, token))
-            if len(hits) >= max_hits:
-                break
+    for token, start, end in hit_spans(shown, terms):
+        hits.append((start, end, token))
+        if len(hits) >= max_hits:
+            break
     if not hits:
         head = _clean(shown[: 2 * width]).strip()
         return Snippet(((head + (" …" if len(shown) > 2 * width else ""), False),))
@@ -102,10 +103,9 @@ def highlight_html(text: str, terms: Collection[str]) -> str:
     shown = display_text(text)
     parts: list[str] = []
     cursor = 0
-    for token, start, end in token_spans(shown):
-        if token in terms:
-            parts.append(html.escape(shown[cursor:start]))
-            parts.append(f"<mark>{html.escape(shown[start:end])}</mark>")
-            cursor = end
+    for _, start, end in hit_spans(shown, terms):
+        parts.append(html.escape(shown[cursor:start]))
+        parts.append(f"<mark>{html.escape(shown[start:end])}</mark>")
+        cursor = end
     parts.append(html.escape(shown[cursor:]))
     return "".join(parts)

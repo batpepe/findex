@@ -4,7 +4,11 @@
 *.bin
 *.pkl
 *.prof
+*.npy
+*.vectors.json
 crawl.log
+scalene-profile.json
+benchmark.json
 
 # python / tooling
 __pycache__/

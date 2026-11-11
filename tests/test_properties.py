@@ -12,7 +12,7 @@ from findex.index import build_index
 from findex.merge import difference, intersect, union
 from findex.query import And, Node, Not, Or, Phrase, Term, explain, parse
 from findex.store import load, save
-from findex.tokenize import display_text, token_spans, tokenize
+from findex.tokenize import display_text, hit_spans, token_spans, tokenize
 
 sorted_ids = st.lists(st.integers(min_value=0, max_value=500), unique=True).map(sorted)
 
@@ -35,6 +35,36 @@ def test_tokens_are_never_empty_or_padded(text: str) -> None:
 @given(st.text())
 def test_token_spans_agree_with_tokenize(text: str) -> None:
     assert [t for t, _, _ in token_spans(display_text(text))] == list(tokenize(text))
+
+
+# words a document might contain, including the awkward ones: case folding that changes
+# length (ß), combining marks, apostrophes, identifiers, Cyrillic, final sigma
+awkward_words = st.sampled_from(
+    [
+        "Lock",
+        "block",
+        "lock's",
+        "don't",
+        "ß",
+        "STRASSE",
+        "straße",
+        "e\u0301",
+        "\u0345",
+        "__init__",
+        "п'ять",
+        "ΣΟΦΟΣ",
+    ]
+)
+texts_with_awkward_words = st.lists(st.one_of(awkward_words, st.text(max_size=8)), max_size=12).map(" ".join)
+
+
+@given(texts_with_awkward_words, st.sets(st.text(min_size=1, max_size=6), max_size=3))
+def test_hit_spans_agree_with_filtering_token_spans(text: str, extra_terms: set[str]) -> None:
+    """The snippet fast path (Lab 8) finds exactly the tokens the slow path finds."""
+    shown = display_text(text)
+    tokens = [token for token, _, _ in token_spans(shown)]
+    terms = set(tokens[::2]) | {t for t in extra_terms if t}  # terms that occur, and random ones
+    assert list(hit_spans(shown, terms)) == [span for span in token_spans(shown) if span[0] in terms]
 
 
 @given(sorted_ids, sorted_ids)
