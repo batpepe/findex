@@ -979,7 +979,11 @@ user -> Cloudflare edge (TLS) -> Tunnel (outbound-only, no open port at home) ->
 - **The image** is published by `.github/workflows/image.yml` in this repo, in the order that keeps a bad
   image out of the registry: build, then the Trivy scan (fails on fixable CRITICAL/HIGH CVEs - the reason the
   Dockerfile runs `apt-get upgrade`), then a smoke test against the running container, and only then the
-  push. Tags are the commit SHA (immutable, what the cluster pins) and the version for releases.
+  push. Tags are the commit SHA (immutable, what the cluster pins) and the version for releases. The gate
+  earned its place on its first run: 5 HIGH CVEs, none in findex or its dependencies - all in the libraries
+  pip vendors (urllib3 2.7.0, msgpack 1.1.2, setuptools 70.3.0's `pkg_resources`) inside the base image's pip.
+  Nothing installs packages at runtime, so the runtime stage now uninstalls pip instead of waiting for a new
+  base image: less in the image is less to patch.
 - **The cluster** is my homelab K3s node, managed from
   [batpepe/devops-homelab-k3s-hybrid-cloud](https://github.com/batpepe/devops-homelab-k3s-hybrid-cloud) by
   ArgoCD (app-of-apps, `prune` + `selfHeal`). `k8s-infrastructure/apps/findex/findex.yaml` is a Deployment,

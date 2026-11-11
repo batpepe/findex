@@ -32,8 +32,11 @@ RUN mkdir -p /app/models \
     && if [ "$EMBED" = "1" ]; then /app/.venv/bin/findex embed /app/index.bin; fi
 
 FROM python:3.14-slim AS runtime
-# security fixes published after the base image was built (the homelab CI gates on Trivy)
+# security fixes published after the base image was built (image.yml and the homelab CI gate on Trivy).
+# pip goes too: nothing installs at runtime (the app lives in /app/.venv), and the libraries pip vendors
+# (urllib3, msgpack, setuptools' pkg_resources) were the image's only HIGH findings.
 RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/* \
+    && python -m pip uninstall --yes --root-user-action=ignore pip \
     && groupadd --system --gid 10001 findex \
     && useradd --system --uid 10001 --gid findex --home-dir /app --shell /usr/sbin/nologin findex
 WORKDIR /app
