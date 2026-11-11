@@ -6,6 +6,10 @@ A full-text search engine over the **Python documentation and every PEP**, built
 over the eight labs of the *Python — Build a Search Engine* course. Each lab adds one language feature
 and one piece of the engine; every lab is tagged (`lab-01`, `lab-02`, …) so the history shows it growing.
 
+**Live: [findex.batpepe.online](https://findex.batpepe.online)** (API browser:
+[/docs](https://findex.batpepe.online/docs)) - self-hosted on my K3s homelab behind a Cloudflare Tunnel,
+deployed by ArgoCD ([Lab 7](#deployed-findexbatpepeonline)).
+
 | Lab | Feature | What it added | Tag |
 |---|---|---|---|
 | 1 | Iterators & generators | streaming corpus, tokenizer, stats in constant memory | `lab-01` |
@@ -14,7 +18,7 @@ and one piece of the engine; every lab is tagged (`lab-01`, `lab-02`, …) so th
 | 4 | Typing, testing, packaging | `findex` CLI (typer + rich), pyright strict, 77 tests, CI, v0.4.0 wheel | `lab-04` |
 | 5 | Concurrency and the GIL | parallel indexing: serial / threads / processes / free-threaded, benchmarked | `lab-05` |
 | 6 | asyncio | a polite async crawler (robots.txt, per-host limits, retries) that feeds the corpus | `lab-06` |
-| 7 | FastAPI, Pydantic, Docker | search API + web UI, containerized, load-tested | `lab-07` |
+| 7 | FastAPI, Pydantic, Docker | search API + web UI, containerized, load-tested, deployed | `lab-07` |
 
 ## Quick start
 
@@ -860,6 +864,12 @@ new connection per request, so with several worker processes an idle one accepts
 | local, 1 worker, `def` | `/search` | 50 | 46 | 1058 | 1680 | 1717 |
 | local, 4 workers, `def` | `/search` | 50 | **150** | **306** | 629 | 976 |
 | local, 1 worker, `def`, 3.14t (no GIL) | `/search` | 50 | 76 | 558 | 1624 | 2956 |
+| deployed: findex.batpepe.online, 1 pod (1 CPU), through Cloudflare | `/search` | 20 | _pending_ | | | |
+
+<!-- the deployed row: after the rollout, from the Mac:
+     oha -z 15s -c 20 --disable-keepalive 'https://findex.batpepe.online/search?q=global+interpreter+lock'
+     (the query cache is on in production: vary q, or read the result as "cached path") -->
+
 
 - **1 worker: ~46 RPS either way** — one GIL, one core's worth of Python; 50 clients just queue, so p50 ≈ 50
   × 21 ms ≈ 1 s. The `async def` row has the slightly worse tail: the loop serves the queued requests strictly
@@ -903,3 +913,40 @@ INFO:     Finished server process [1]
 
 323 MB (Debian slim + Python 32 MB + venv 48 MB + index 34 MB). `docker run -v $PWD/index.bin:/data/index.bin
 -e INDEX_PATH=/data/index.bin` serves any other index.
+
+### Deployed: findex.batpepe.online
+
+```text
+git push -> image.yml: build -> Trivy (CRITICAL/HIGH gate) -> smoke test -> ghcr.io/batpepe/findex:<commit sha>
+          -> homelab repo: k8s-infrastructure/apps/findex pins that sha -> ArgoCD syncs it to K3s
+user -> Cloudflare edge (TLS) -> Tunnel (outbound-only, no open port at home) -> Traefik -> findex pod
+```
+
+- **The image** is published by `.github/workflows/image.yml` in this repo, in the order that keeps a bad
+  image out of the registry: build, then the Trivy scan (fails on fixable CRITICAL/HIGH CVEs - the reason the
+  Dockerfile runs `apt-get upgrade`), then a smoke test against the running container, and only then the
+  push. Tags are the commit SHA (immutable, what the cluster pins) and the version for releases.
+- **The cluster** is my homelab K3s node, managed from
+  [batpepe/devops-homelab-k3s-hybrid-cloud](https://github.com/batpepe/devops-homelab-k3s-hybrid-cloud) by
+  ArgoCD (app-of-apps, `prune` + `selfHeal`). `k8s-infrastructure/apps/findex/findex.yaml` is a Deployment,
+  a Service and an Ingress for `findex.batpepe.online`; the hostname is added to the Terraform-managed DNS
+  allowlist of the Cloudflare Tunnel. The pod runs as uid 10001 with a read-only root filesystem, no Linux
+  capabilities and the `RuntimeDefault` seccomp profile; it asks for 384 MiB and is capped at 768 MiB and one
+  CPU. Configuration is environment variables only - the same image runs in CI, with `docker run` and here.
+- **Health check wired, on purpose asymmetric:** the *readiness* probe is `GET /health`, so the pod gets no
+  traffic until the index is loaded (and Traefik stops sending traffic if it ever reports 503). The
+  *liveness* probe only checks that the port accepts connections: a pod whose index failed to load answers
+  503 by design (the Lab 7 lifespan), and restarting it would just repeat the failure in a loop. The
+  blackbox exporter probes `https://findex.batpepe.online/health` every minute from inside the cluster, so
+  an outage reaches Prometheus and the Telegram alert, and the portal at batpepe.online shows a live dot.
+- **Logs** are JSON lines on stdout (`LOG_JSON=true`), one per request with its id:
+  `kubectl -n apps logs deploy/findex -f`, or Grafana/Loki.
+
+**What I learned.** ASGI is the reason one process can serve thousands of waiting connections, and FastAPI
+puts most of a service's contract in type hints: validation, the 422s, the OpenAPI page. But choosing `def` or
+`async def` is not a style choice - it decides whether CPU work blocks the event loop - and under the GIL
+even the thread pool runs one search at a time, which is why the 4-process row beats everything and why the
+free-threaded build exposed a shared-`memoryview` race the GIL had hidden. Deploying added the operational
+half: a health endpoint is a contract with the orchestrator (ready vs alive are different questions), and
+"the same image everywhere, configured by the environment" is what made the CI smoke test, my laptop and
+the cluster run identical bytes.

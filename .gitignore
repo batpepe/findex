@@ -1,5 +1,5 @@
 # corpus and generated artifacts never go into git
-data/
+/data/
 *.idx
 *.bin
 *.pkl
